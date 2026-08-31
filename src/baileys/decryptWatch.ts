@@ -14,8 +14,9 @@ interface ILogger {
 
 const base = P({ level: "error" });
 
-// Quantas falhas seguidas de decriptação pro MESMO contato, dentro dessa
-// janela, disparam a renegociação automática (assertSessions com force).
+// Quantas falhas seguidas de decriptação/mensagem vazia pro MESMO contato,
+// dentro dessa janela, disparam a renegociação automática (assertSessions
+// com force).
 const FAILURE_THRESHOLD = 3;
 const WINDOW_MS = 2 * 60 * 1000;
 
@@ -24,34 +25,46 @@ interface FailureState {
   windowStart: number;
 }
 
-// Só dispara o callback definido em createDecryptWatchLogger — o cache de
-// contadores fica isolado por sessão (Map por instância).
-export function createDecryptWatchLogger(
+export interface FailureTracker {
+  noteFailure(jid: string | undefined | null, reason: string): void;
+}
+
+// Cobre dois casos bem diferentes, que precisam contar pro mesmo limite:
+// 1) Falha de decriptação Signal de verdade (erro no log do Baileys,
+//    "failed to decrypt message" — Bad MAC, No session record, etc).
+// 2) Mensagem "stub" vazia (messageStubType 2 / CIPHERTEXT — o WhatsApp
+//    entrega um envelope sem conteúdo, "Message absent from node"). Esse
+//    caso NUNCA gera um erro de log — precisa ser detectado direto no
+//    messages.upsert (ver session.ts), não dá pra pegar só ouvindo o logger.
+export function createFailureTracker(
   sessionId: string,
   onRepeatedFailure: (jid: string) => void
-): ILogger {
+): FailureTracker {
   const failures = new Map<string, FailureState>();
 
-  function noteFailure(obj: unknown) {
-    const jid = (obj as any)?.key?.remoteJid;
-    if (!jid || typeof jid !== "string") return;
+  return {
+    noteFailure(jid, reason) {
+      if (!jid || typeof jid !== "string") return;
 
-    const now = Date.now();
-    const state = failures.get(jid);
-    if (!state || now - state.windowStart > WINDOW_MS) {
-      failures.set(jid, { count: 1, windowStart: now });
-      return;
-    }
-    state.count += 1;
-    if (state.count >= FAILURE_THRESHOLD) {
-      failures.delete(jid);
-      console.warn(
-        `[decrypt-watch:${sessionId}] ${FAILURE_THRESHOLD} falhas de decriptação seguidas com ${jid} — renegociando sessão automaticamente`
-      );
-      onRepeatedFailure(jid);
-    }
-  }
+      const now = Date.now();
+      const state = failures.get(jid);
+      if (!state || now - state.windowStart > WINDOW_MS) {
+        failures.set(jid, { count: 1, windowStart: now });
+        return;
+      }
+      state.count += 1;
+      if (state.count >= FAILURE_THRESHOLD) {
+        failures.delete(jid);
+        console.warn(
+          `[decrypt-watch:${sessionId}] ${FAILURE_THRESHOLD} falhas (${reason}) seguidas com ${jid} — renegociando sessão automaticamente`
+        );
+        onRepeatedFailure(jid);
+      }
+    },
+  };
+}
 
+export function createDecryptWatchLogger(sessionId: string, tracker: FailureTracker): ILogger {
   function wrap(pinoLogger: any): ILogger {
     return {
       get level() {
@@ -66,7 +79,9 @@ export function createDecryptWatchLogger(
       info: (obj: unknown, msg?: string) => pinoLogger.info(obj, msg),
       warn: (obj: unknown, msg?: string) => pinoLogger.warn(obj, msg),
       error: (obj: unknown, msg?: string) => {
-        if (msg === "failed to decrypt message") noteFailure(obj);
+        if (msg === "failed to decrypt message") {
+          tracker.noteFailure((obj as any)?.key?.remoteJid, "decrypt");
+        }
         pinoLogger.error(obj, msg);
       },
     } as ILogger;

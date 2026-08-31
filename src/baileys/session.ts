@@ -3,6 +3,7 @@ import makeWASocket, {
   WASocket,
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
+  WAMessageStubType,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import { useRedisAuthState, clearRedisAuthState } from "./authState";
@@ -12,7 +13,7 @@ import { SessionRecord, SessionStatus } from "../types";
 import { upsertLabelInStore } from "./labelStore";
 import { downloadMedia, isDownloadableMedia } from "./media";
 import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCache";
-import { createDecryptWatchLogger } from "./decryptWatch";
+import { createDecryptWatchLogger, createFailureTracker } from "./decryptWatch";
 import { acquireLock, releaseLock } from "./lock";
 
 type Managed = {
@@ -104,8 +105,10 @@ export async function startSession(id: string): Promise<SessionRecord> {
   // Escuta falhas repetidas de decriptação com o mesmo contato e renegocia
   // a sessão automaticamente (assertSessions com force) — sem isso, um
   // contato preso em "Aguardando mensagem" só destrava com intervenção
-  // manual, como identificamos hoje.
-  const sessionLogger = createDecryptWatchLogger(id, async (jid) => {
+  // manual, como identificamos hoje. O tracker é compartilhado entre o
+  // logger (falhas de decriptação de verdade) e o handler de mensagens
+  // (mensagens "stub" vazias — ver comentário em decryptWatch.ts).
+  const failureTracker = createFailureTracker(id, async (jid) => {
     const managed = live.get(id);
     if (!managed) return;
     try {
@@ -115,6 +118,7 @@ export async function startSession(id: string): Promise<SessionRecord> {
       console.error(`[decrypt-watch:${id}] falha ao renegociar sessão com ${jid}`, (err as Error).message);
     }
   });
+  const sessionLogger = createDecryptWatchLogger(id, failureTracker);
 
   const sock = makeWASocket({
     version,
@@ -206,6 +210,18 @@ export async function startSession(id: string): Promise<SessionRecord> {
         continue;
       }
 
+      // Mensagem "stub" vazia (o WhatsApp entrega um envelope sem conteúdo,
+      // "Message absent from node") — isso NUNCA gera erro de log, então
+      // sem essa checagem aqui o failureTracker nunca saberia que esse
+      // contato está tendo problema. Conta pro mesmo limite das falhas de
+      // decriptação de verdade.
+      if (
+        msg.messageStubType === WAMessageStubType.CIPHERTEXT &&
+        !msg.key?.fromMe
+      ) {
+        failureTracker.noteFailure(remoteJid, "stub_vazio");
+      }
+
       // Mídia (imagem/vídeo/áudio/documento/figurinha) precisa ser baixada
       // e DECRIPTADA aqui — só o socket com a sessão ativa tem as chaves.
       // O upload pro Storage acontece do lado do custom-webhook, que já tem
@@ -242,9 +258,19 @@ export async function stopSession(id: string, wipe: boolean): Promise<void> {
   if (managed) {
     managed.sock.ev.removeAllListeners("connection.update");
     try {
-      managed.sock.end(undefined as any);
-    } catch {
-      /* ignore */
+      if (wipe) {
+        // Desvincula de verdade no WhatsApp (avisa o servidor pra soltar
+        // esse "aparelho"), não só derruba a conexão local. Sem isso,
+        // toda vez que apagávamos uma sessão ficava um vínculo fantasma
+        // ativo do lado do WhatsApp, que pode confundir qual sessão é a
+        // "real" — especialmente relevante pra números que já tiveram
+        // histórico de coexistência com a Cloud API.
+        await managed.sock.logout();
+      } else {
+        managed.sock.end(undefined as any);
+      }
+    } catch (err) {
+      console.error(`[session:${id}] falha ao ${wipe ? "deslogar" : "encerrar"} socket`, (err as Error).message);
     }
     live.delete(id);
   }
