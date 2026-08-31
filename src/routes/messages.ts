@@ -66,8 +66,16 @@ messagesRouter.post("/sessions/:id/send-media", async (req, res) => {
     let content: Record<string, unknown>;
 
     if (mediaType === "document") {
-      content = { document: { url }, fileName: filename, caption };
       const isPdf = /\.pdf($|\?)/i.test(filename ?? url);
+      content = {
+        document: { url },
+        fileName: filename,
+        caption,
+        // O tipo do documento exige mimetype explícito — sem isso, alguns
+        // clientes WhatsApp caem no ícone genérico em vez de tentar
+        // renderizar a miniatura mesmo com jpegThumbnail presente.
+        mimetype: isPdf ? "application/pdf" : "application/octet-stream",
+      };
       if (isPdf) {
         try {
           const pdfRes = await fetch(url);
