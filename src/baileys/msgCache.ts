@@ -9,11 +9,15 @@ import { proto, WAMessage, WAMessageKey } from "@whiskeysockets/baileys";
 export const msgRetryCounterCache = new NodeCache({ stdTTL: 600, checkperiod: 120 });
 
 // getMessage: quando alguém pede reenvio de uma mensagem (retry receipt), o
-// Baileys precisa conseguir devolver o conteúdo original. Sem isso, o pedido
-// de retry cai no vazio e o remetente fica preso no "aguardando mensagem".
-// Cache simples em memória, por processo — só precisa cobrir mensagens
-// recentes (minutos), não histórico completo.
-const messageCache = new NodeCache({ stdTTL: 300, checkperiod: 60, useClones: false });
+// Baileys precisa conseguir devolver o conteúdo original pra reenviar
+// (sendMessagesAgain, que já renegocia a sessão automaticamente via
+// assertSessions por baixo dos panos). Se o pedido de retry chegar depois
+// que o cache expirou, o Baileys desiste silenciosamente ("message not
+// available") — foi exatamente isso que aconteceu com o "Aguardando
+// mensagem" no Desktop, que demorou mais que os 5 minutos antigos. 24h é
+// bem mais realista pro tempo que um dispositivo pode ficar sem processar
+// um retry (guarda só o conteúdo da mensagem, não o objeto inteiro).
+const messageCache = new NodeCache({ stdTTL: 24 * 60 * 60, checkperiod: 600, useClones: false });
 
 function cacheKey(key: WAMessageKey): string {
   return `${key.remoteJid}:${key.id}`;
