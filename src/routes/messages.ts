@@ -19,16 +19,22 @@ messagesRouter.post("/sessions/:id/send-text", async (req, res) => {
   if (!to || !text) return res.status(400).json({ error: "to and text are required" });
 
   const sock = requireSocket(id, res);
-  if (!sock) return;
+  if (!sock) {
+    console.warn(`[send-text:${id}] rejeitado — sessão não conectada (to=${to})`);
+    return;
+  }
 
+  const jid = toJid(to);
+  console.log(`[send-text:${id}] enviando para ${jid} (${text.length} chars)`);
   try {
-    const jid = toJid(to);
     const sent = await sock.sendMessage(jid, { text });
+    console.log(`[send-text:${id}] enviado com sucesso — provider_message_id=${sent?.key?.id}`);
     res.json({
       provider_message_id: sent?.key?.id ?? null,
       resolved_jid: jid,
     });
   } catch (err) {
+    console.error(`[send-text:${id}] falhou ao enviar para ${jid}:`, (err as Error).message);
     res.status(502).json({ error: (err as Error).message });
   }
 });
@@ -48,10 +54,14 @@ messagesRouter.post("/sessions/:id/send-media", async (req, res) => {
   }
 
   const sock = requireSocket(id, res);
-  if (!sock) return;
+  if (!sock) {
+    console.warn(`[send-media:${id}] rejeitado — sessão não conectada (to=${to}, tipo=${mediaType})`);
+    return;
+  }
 
+  const jid = toJid(to);
+  console.log(`[send-media:${id}] enviando ${mediaType} para ${jid}`);
   try {
-    const jid = toJid(to);
     const content: Record<string, unknown> =
       mediaType === "image"
         ? { image: { url }, caption }
@@ -62,8 +72,10 @@ messagesRouter.post("/sessions/:id/send-media", async (req, res) => {
         : { document: { url }, fileName: filename, caption };
 
     const sent = await sock.sendMessage(jid, content as any);
+    console.log(`[send-media:${id}] enviado com sucesso — provider_message_id=${sent?.key?.id}`);
     res.json({ provider_message_id: sent?.key?.id ?? null, resolved_jid: jid });
   } catch (err) {
+    console.error(`[send-media:${id}] falhou ao enviar ${mediaType} para ${jid}:`, (err as Error).message);
     res.status(502).json({ error: (err as Error).message });
   }
 });

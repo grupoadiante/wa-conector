@@ -29,7 +29,10 @@ export async function sendWebhookEvent(
         signal: controller.signal,
       }).finally(() => clearTimeout(timeout));
 
-      if (res.ok) return;
+      if (res.ok) {
+        console.log(`[webhook] ${event} (sessão ${sessionId}) entregue com sucesso`);
+        return;
+      }
       console.error(
         `[webhook] ${event} respondeu ${res.status} (tentativa ${attempt + 1})`
       );
