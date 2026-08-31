@@ -161,6 +161,14 @@ export async function startSession(id: string): Promise<SessionRecord> {
     for (const msg of m.messages) {
       rememberMessage(msg);
 
+      // Mensagens de grupo (@g.us) e de listas de transmissão (@broadcast)
+      // não são tratadas como conversa de lead — nunca repassa pro CRM,
+      // pra evitar o bot respondendo dentro de um grupo.
+      const remoteJid = msg.key?.remoteJid ?? "";
+      if (remoteJid.endsWith("@g.us") || remoteJid.endsWith("@broadcast")) {
+        continue;
+      }
+
       // Mídia (imagem/vídeo/áudio/documento/figurinha) precisa ser baixada
       // e DECRIPTADA aqui — só o socket com a sessão ativa tem as chaves.
       // O upload pro Storage acontece do lado do custom-webhook, que já tem
