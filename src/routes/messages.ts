@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { getLiveSocket } from "../baileys/session";
 import { toJid } from "../jid";
+import { pdfFirstPageThumbnail } from "../baileys/pdfThumbnail";
 
 export const messagesRouter = Router();
 
@@ -62,14 +63,36 @@ messagesRouter.post("/sessions/:id/send-media", async (req, res) => {
   const jid = toJid(to);
   console.log(`[send-media:${id}] enviando ${mediaType} para ${jid}`);
   try {
-    const content: Record<string, unknown> =
-      mediaType === "image"
-        ? { image: { url }, caption }
-        : mediaType === "video"
-        ? { video: { url }, caption }
-        : mediaType === "audio"
-        ? { audio: { url }, ptt: true, mimetype: "audio/ogg; codecs=opus" }
-        : { document: { url }, fileName: filename, caption };
+    let content: Record<string, unknown>;
+
+    if (mediaType === "document") {
+      content = { document: { url }, fileName: filename, caption };
+      const isPdf = /\.pdf($|\?)/i.test(filename ?? url);
+      if (isPdf) {
+        try {
+          const pdfRes = await fetch(url);
+          if (pdfRes.ok) {
+            const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
+            const thumb = await pdfFirstPageThumbnail(pdfBuffer);
+            if (thumb) {
+              content.jpegThumbnail = thumb;
+              console.log(`[send-media:${id}] miniatura de PDF gerada (${thumb.length} bytes)`);
+            }
+          } else {
+            console.warn(`[send-media:${id}] não consegui baixar o PDF pra gerar miniatura [${pdfRes.status}]`);
+          }
+        } catch (thumbErr) {
+          console.error(`[send-media:${id}] falha ao gerar miniatura do PDF`, (thumbErr as Error).message);
+        }
+      }
+    } else {
+      content =
+        mediaType === "image"
+          ? { image: { url }, caption }
+          : mediaType === "video"
+          ? { video: { url }, caption }
+          : { audio: { url }, ptt: true, mimetype: "audio/ogg; codecs=opus" };
+    }
 
     const sent = await sock.sendMessage(jid, content as any);
     console.log(`[send-media:${id}] enviado com sucesso — provider_message_id=${sent?.key?.id}`);

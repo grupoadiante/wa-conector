@@ -13,6 +13,7 @@
     "@whiskeysockets/baileys": "^6.7.18",
     "express": "^4.21.2",
     "ioredis": "^5.4.2",
+    "node-cache": "^5.1.2",
     "pino": "^9.5.0",
     "qrcode": "^1.5.4"
   },

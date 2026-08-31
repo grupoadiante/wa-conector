@@ -4,6 +4,7 @@ import { requireApiKey } from "./authMiddleware";
 import { sessionsRouter } from "./routes/sessions";
 import { messagesRouter } from "./routes/messages";
 import { labelsRouter } from "./routes/labels";
+import { resumeAllSessions } from "./baileys/session";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -24,6 +25,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 
 app.listen(config.port, () => {
   console.log(`wa-connector ouvindo na porta ${config.port}`);
+  resumeAllSessions().catch((err) => console.error("[resume] falha geral ao religar sessões", err));
 });
 
 process.on("unhandledRejection", (reason) => {

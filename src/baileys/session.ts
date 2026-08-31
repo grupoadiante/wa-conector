@@ -11,6 +11,8 @@ import { redis } from "../redis";
 import { sendWebhookEvent } from "../webhook";
 import { SessionRecord, SessionStatus } from "../types";
 import { upsertLabelInStore } from "./labelStore";
+import { downloadMedia, isDownloadableMedia } from "./media";
+import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCache";
 
 const logger = P({ level: "error" });
 
@@ -87,6 +89,9 @@ export async function startSession(id: string): Promise<SessionRecord> {
     printQRInTerminal: false,
     browser: ["WA Connector", "Chrome", "1.0.0"],
     syncFullHistory: false,
+    // Resolve o "Waiting for this message" — ver comentários em msgCache.ts.
+    msgRetryCounterCache,
+    getMessage: async (key) => getCachedMessage(key),
   });
 
   live.set(id, { sock, qrRetries: 0 });
@@ -154,7 +159,17 @@ export async function startSession(id: string): Promise<SessionRecord> {
 
   sock.ev.on("messages.upsert", async (m) => {
     for (const msg of m.messages) {
-      await sendWebhookEvent(id, "message", msg);
+      rememberMessage(msg);
+
+      // Mídia (imagem/vídeo/áudio/documento/figurinha) precisa ser baixada
+      // e DECRIPTADA aqui — só o socket com a sessão ativa tem as chaves.
+      // O upload pro Storage acontece do lado do custom-webhook, que já tem
+      // acesso embutido às credenciais do Supabase.
+      let media: { base64: string; mimetype: string | null; filename: string | null } | null = null;
+      if (isDownloadableMedia(msg)) {
+        media = await downloadMedia(sock, id, msg);
+      }
+      await sendWebhookEvent(id, "message", { ...msg, media });
     }
   });
 
@@ -199,4 +214,21 @@ export async function stopSession(id: string, wipe: boolean): Promise<void> {
 export async function restartSession(id: string): Promise<SessionRecord> {
   await stopSession(id, false);
   return startSession(id);
+}
+
+// Chamado uma vez na inicialização do processo. O container pode reiniciar
+// (redeploy, crash, restart manual) sem que ninguém chame /sessions/:id de
+// novo — sem isso, a sessão fica com credenciais salvas no Redis mas nenhum
+// socket vivo, e todo envio falha com 409 até alguém notar. Aqui a gente
+// religa sozinho qualquer sessão que não estava explicitamente desconectada.
+export async function resumeAllSessions(): Promise<void> {
+  const ids = await listSessionIds();
+  for (const id of ids) {
+    const record = await readRecord(id);
+    if (!record || record.status === "disconnected") continue;
+    console.log(`[resume] religando sessão ${id} (status salvo: ${record.status})`);
+    startSession(id).catch((err) =>
+      console.error(`[resume] falha ao religar sessão ${id}`, err)
+    );
+  }
 }
