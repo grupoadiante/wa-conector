@@ -23,8 +23,13 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   res.status(500).json({ error: "internal_error" });
 });
 
+// Identificador de build — muda a cada versão que eu te mando, pra você
+// conseguir confirmar no log qual código está rodando de verdade, sem
+// depender de lembrar qual zip foi o último aplicado.
+const BUILD_VERSION = "2026-08-31-auto-heal-lock-24hcache";
+
 app.listen(config.port, () => {
-  console.log(`wa-connector ouvindo na porta ${config.port}`);
+  console.log(`wa-connector ouvindo na porta ${config.port} — build: ${BUILD_VERSION}`);
   resumeAllSessions().catch((err) => console.error("[resume] falha geral ao religar sessões", err));
 });
 
