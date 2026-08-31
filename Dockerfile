@@ -17,7 +17,9 @@ RUN npm run build
 FROM node:20-slim
 WORKDIR /app
 ENV NODE_ENV=production
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+# poppler-utils dá o comando pdftoppm, usado pra gerar a miniatura da
+# primeira página de PDFs enviados como documento.
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates poppler-utils \
   && rm -rf /var/lib/apt/lists/* \
   && git config --global url."https://github.com/".insteadOf "git@github.com:" \
   && git config --global url."https://github.com/".insteadOf "ssh://git@github.com/"
