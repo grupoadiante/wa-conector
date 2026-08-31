@@ -129,3 +129,29 @@ messagesRouter.post("/sessions/:id/typing", async (req, res) => {
     res.status(502).json({ error: (err as Error).message });
   }
 });
+
+// Força uma renegociação de sessão de criptografia (Signal) com um contato
+// específico — busca um PreKey bundle novo do WhatsApp e sobrescreve
+// qualquer sessão local corrompida. Usa isso quando um contato específico
+// fica preso em "Aguardando mensagem" mesmo depois de reconectar a sessão
+// inteira (reconectar não limpa o estado de criptografia por contato, só
+// isso limpa).
+messagesRouter.post("/sessions/:id/reset-peer-session", async (req, res) => {
+  const { id } = req.params;
+  const { to } = req.body as { to?: string };
+  if (!to) return res.status(400).json({ error: "to is required" });
+
+  const sock = requireSocket(id, res);
+  if (!sock) return;
+
+  try {
+    const jid = toJid(to);
+    console.log(`[reset-peer-session:${id}] forçando nova sessão com ${jid}`);
+    const fetched = await sock.assertSessions([jid], true);
+    console.log(`[reset-peer-session:${id}] sessão renegociada com ${jid} (fetched=${fetched})`);
+    res.json({ ok: true, jid, fetched });
+  } catch (err) {
+    console.error(`[reset-peer-session:${id}] falhou para ${to}:`, (err as Error).message);
+    res.status(502).json({ error: (err as Error).message });
+  }
+});
