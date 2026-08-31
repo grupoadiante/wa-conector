@@ -1,0 +1,26 @@
+{
+  "name": "wa-connector",
+  "version": "1.0.0",
+  "description": "Servidor próprio de conexão WhatsApp (Baileys) — alternativa ao WAHA, com sessão resiliente e webhook pro Supabase",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "^6.7.18",
+    "express": "^4.21.2",
+    "ioredis": "^5.4.2",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.2",
+    "@types/qrcode": "^1.5.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
