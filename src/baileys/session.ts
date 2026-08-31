@@ -5,7 +5,6 @@ import makeWASocket, {
   makeCacheableSignalKeyStore,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
-import P from "pino";
 import { useRedisAuthState, clearRedisAuthState } from "./authState";
 import { redis } from "../redis";
 import { sendWebhookEvent } from "../webhook";
@@ -13,8 +12,8 @@ import { SessionRecord, SessionStatus } from "../types";
 import { upsertLabelInStore } from "./labelStore";
 import { downloadMedia, isDownloadableMedia } from "./media";
 import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCache";
-
-const logger = P({ level: "error" });
+import { createDecryptWatchLogger } from "./decryptWatch";
+import { acquireLock, releaseLock } from "./lock";
 
 type Managed = {
   sock: WASocket;
@@ -74,18 +73,56 @@ export async function startSession(id: string): Promise<SessionRecord> {
   const existing = live.get(id);
   if (existing) return (await readRecord(id))!;
 
+  // Evita dois processos (container antigo + novo durante um redeploy)
+  // segurando a mesma sessão do WhatsApp ao mesmo tempo — isso corrompia
+  // as chaves de criptografia por contato (ver lock.ts). Se não conseguir
+  // o lock, outro processo já está com essa sessão viva; tenta de novo em
+  // breve em vez de brigar por ela.
+  const gotLock = await acquireLock(id);
+  if (!gotLock) {
+    console.warn(`[session:${id}] lock ocupado por outro processo — tentando de novo em 5s`);
+    setTimeout(() => {
+      startSession(id).catch((err) =>
+        console.error(`[session:${id}] falha ao tentar de novo após lock ocupado`, err)
+      );
+    }, 5000);
+    return (await readRecord(id)) ?? {
+      id,
+      status: "starting",
+      qr: null,
+      phoneNumber: null,
+      pushName: null,
+      updatedAt: new Date().toISOString(),
+    };
+  }
+
   await writeRecord(id, { status: "starting", qr: null });
 
   const { state, saveCreds } = await useRedisAuthState(id);
   const { version } = await fetchLatestBaileysVersion();
 
+  // Escuta falhas repetidas de decriptação com o mesmo contato e renegocia
+  // a sessão automaticamente (assertSessions com force) — sem isso, um
+  // contato preso em "Aguardando mensagem" só destrava com intervenção
+  // manual, como identificamos hoje.
+  const sessionLogger = createDecryptWatchLogger(id, async (jid) => {
+    const managed = live.get(id);
+    if (!managed) return;
+    try {
+      const fetched = await managed.sock.assertSessions([jid], true);
+      console.log(`[decrypt-watch:${id}] sessão renegociada com ${jid} (fetched=${fetched})`);
+    } catch (err) {
+      console.error(`[decrypt-watch:${id}] falha ao renegociar sessão com ${jid}`, (err as Error).message);
+    }
+  });
+
   const sock = makeWASocket({
     version,
     auth: {
       creds: state.creds,
-      keys: makeCacheableSignalKeyStore(state.keys, logger),
+      keys: makeCacheableSignalKeyStore(state.keys, sessionLogger),
     },
-    logger,
+    logger: sessionLogger,
     printQRInTerminal: false,
     browser: ["WA Connector", "Chrome", "1.0.0"],
     syncFullHistory: false,
@@ -211,6 +248,7 @@ export async function stopSession(id: string, wipe: boolean): Promise<void> {
     }
     live.delete(id);
   }
+  await releaseLock(id);
   if (wipe) {
     await clearRedisAuthState(id);
     await redis.del(recordKey(id));
@@ -239,4 +277,12 @@ export async function resumeAllSessions(): Promise<void> {
       console.error(`[resume] falha ao religar sessão ${id}`, err)
     );
   }
+}
+
+// Chamado no desligamento (SIGTERM) — libera os locks das sessões vivas
+// neste processo, sem tentar fechar os sockets com calma (o processo está
+// morrendo de qualquer forma). O container novo assume mais rápido.
+export async function releaseAllLocksForShutdown(): Promise<void> {
+  const ids = [...live.keys()];
+  await Promise.all(ids.map((id) => releaseLock(id)));
 }
