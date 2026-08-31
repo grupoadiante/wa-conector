@@ -10,6 +10,7 @@ import { useRedisAuthState, clearRedisAuthState } from "./authState";
 import { redis } from "../redis";
 import { sendWebhookEvent } from "../webhook";
 import { SessionRecord, SessionStatus } from "../types";
+import { upsertLabelInStore } from "./labelStore";
 
 const logger = P({ level: "error" });
 
@@ -154,6 +155,22 @@ export async function startSession(id: string): Promise<SessionRecord> {
   sock.ev.on("messages.upsert", async (m) => {
     for (const msg of m.messages) {
       await sendWebhookEvent(id, "message", msg);
+    }
+  });
+
+  // Mantém o cache de definições de etiqueta atualizado — o Baileys não
+  // expõe uma lista pronta, só avisa por evento quando algo muda (inclusive
+  // no sync inicial da sessão, quando ele reenvia todas as existentes).
+  sock.ev.on("labels.edit", async (label) => {
+    try {
+      await upsertLabelInStore(id, {
+        id: label.id,
+        name: label.name,
+        color: label.color,
+        deleted: !!label.deleted,
+      });
+    } catch (err) {
+      console.error(`[session:${id}] falha ao gravar label no cache`, err);
     }
   });
 

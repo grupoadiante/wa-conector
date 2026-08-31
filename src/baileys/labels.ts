@@ -52,10 +52,7 @@ export async function applyLabel(
 ): Promise<LabelOpResult> {
   return withLabelSafety(sessionId, async () => {
     const sock = getLiveSocket(sessionId)!;
-    await sock.chatModify(
-      { addLabels: { [labelId]: true } } as any,
-      chatId
-    );
+    await sock.chatModify({ addChatLabel: { labelId } }, chatId);
   });
 }
 
@@ -66,9 +63,22 @@ export async function removeLabel(
 ): Promise<LabelOpResult> {
   return withLabelSafety(sessionId, async () => {
     const sock = getLiveSocket(sessionId)!;
-    await sock.chatModify(
-      { addLabels: { [labelId]: false } } as any,
-      chatId
-    );
+    await sock.chatModify({ removeChatLabel: { labelId } }, chatId);
+  });
+}
+
+// Cria ou edita a DEFINIÇÃO de uma etiqueta (nome/cor) — diferente de
+// aplicá-la numa conversa. O `id` é escolhido por quem chama (WhatsApp não
+// gera um automaticamente); reaproveitar o mesmo id em chamadas futuras edita
+// a etiqueta existente em vez de criar uma nova.
+export async function upsertLabelDefinition(
+  sessionId: string,
+  label: { id: string; name?: string; color?: number; deleted?: boolean }
+): Promise<LabelOpResult> {
+  return withLabelSafety(sessionId, async () => {
+    const sock = getLiveSocket(sessionId)!;
+    // O jid aqui é só o contexto da chamada — a definição da etiqueta é
+    // global na conta, não por conversa.
+    await sock.chatModify({ addLabel: label }, sock.user!.id);
   });
 }
