@@ -15,9 +15,13 @@ export async function pdfFirstPageThumbnail(pdfBuffer: Buffer): Promise<Buffer |
     await writeFile(inputPath, pdfBuffer);
 
     await new Promise<void>((resolve, reject) => {
-      // -r 100: resolução suficiente pra miniatura sem gerar arquivo grande.
+      // -scale-to 200: gera uma miniatura de verdade (maior lado = 200px),
+      // não uma página inteira. O WhatsApp espera um jpegThumbnail pequeno
+      // (poucos KB) — a versão anterior gerava ~100KB em resolução quase de
+      // página inteira, o que provavelmente sobrecarregava sessões já
+      // frágeis (como a do Desktop) no envio pra alguns dispositivos.
       const proc = spawn("pdftoppm", [
-        "-jpeg", "-f", "1", "-l", "1", "-r", "100", "-singlefile",
+        "-jpeg", "-f", "1", "-l", "1", "-scale-to", "200", "-singlefile",
         inputPath, outputPrefix,
       ]);
       let stderr = "";
