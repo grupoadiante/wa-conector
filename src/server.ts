@@ -26,7 +26,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 // Identificador de build — muda a cada versão que eu te mando, pra você
 // conseguir confirmar no log qual código está rodando de verdade, sem
 // depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-08-31-real-logout";
+const BUILD_VERSION = "2026-08-31-label-chat-lookup";
 
 app.listen(config.port, () => {
   console.log(`wa-connector ouvindo na porta ${config.port} — build: ${BUILD_VERSION}`);

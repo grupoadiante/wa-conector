@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { getLiveSocket } from "../baileys/session";
 import { applyLabel, removeLabel, upsertLabelDefinition } from "../baileys/labels";
-import { listLabelsFromStore } from "../baileys/labelStore";
+import { listLabelsFromStore, listChatLabels } from "../baileys/labelStore";
 import { toJid } from "../jid";
 
 export const labelsRouter = Router();
@@ -56,4 +56,17 @@ labelsRouter.post("/sessions/:id/labels/remove", async (req, res) => {
   }
   const result = await removeLabel(id, toJid(chat_id), label_id);
   res.status(result.ok ? 200 : 502).json(result);
+});
+
+// Quais etiquetas um chat específico tem — não existia antes, por isso o
+// painel sempre mostrava "nenhuma etiqueta" mesmo com a aplicação
+// funcionando. Alimentado pelo evento labels.association (ver session.ts).
+labelsRouter.get("/sessions/:id/labels/chats/:chatId", async (req, res) => {
+  const { id, chatId } = req.params;
+  try {
+    const labelIds = await listChatLabels(id, toJid(chatId));
+    res.json({ chat_id: toJid(chatId), label_ids: labelIds });
+  } catch (err) {
+    res.status(502).json({ error: (err as Error).message });
+  }
 });

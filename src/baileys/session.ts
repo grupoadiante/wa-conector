@@ -10,7 +10,7 @@ import { useRedisAuthState, clearRedisAuthState } from "./authState";
 import { redis } from "../redis";
 import { sendWebhookEvent } from "../webhook";
 import { SessionRecord, SessionStatus } from "../types";
-import { upsertLabelInStore } from "./labelStore";
+import { upsertLabelInStore, setChatLabelAssociation } from "./labelStore";
 import { downloadMedia, isDownloadableMedia } from "./media";
 import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCache";
 import { createDecryptWatchLogger, createFailureTracker } from "./decryptWatch";
@@ -247,6 +247,18 @@ export async function startSession(id: string): Promise<SessionRecord> {
       });
     } catch (err) {
       console.error(`[session:${id}] falha ao gravar label no cache`, err);
+    }
+  });
+
+  // Rastreia quais etiquetas cada chat tem — só chega por evento, não tem
+  // "get" pronto no Baileys pra isso. É o que faltava pra GET /labels/chats
+  // funcionar (antes só dava pra aplicar/remover às cegas).
+  sock.ev.on("labels.association", async ({ association, type }) => {
+    if (association.type !== "label_jid") return; // ignora associação em mensagem específica
+    try {
+      await setChatLabelAssociation(id, association.chatId, association.labelId, type === "add");
+    } catch (err) {
+      console.error(`[session:${id}] falha ao gravar associação de label`, err);
     }
   });
 
