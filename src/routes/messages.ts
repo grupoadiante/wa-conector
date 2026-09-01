@@ -66,7 +66,30 @@ messagesRouter.post("/sessions/:id/send-media", async (req, res) => {
     let content: Record<string, unknown>;
 
     if (mediaType === "document") {
-      const isPdf = /\.pdf($|\?)/i.test(filename ?? url);
+      // Detecta PDF de verdade — por Content-Type e pelos magic bytes
+      // (%PDF-), não só pelo nome/URL terminar em .pdf. Um gerador de PDF
+      // dinâmico (ex: /orcamento/123/gerar-pdf) não tem extensão na URL, e
+      // depender só do nome fazia a miniatura falhar silenciosamente pra
+      // esses casos. Isso também evita baixar o arquivo duas vezes: já
+      // aproveitamos esse fetch pra gerar a miniatura se for PDF.
+      let isPdf = /\.pdf($|\?)/i.test(filename ?? url);
+      let downloaded: Buffer | null = null;
+      try {
+        const docRes = await fetch(url);
+        if (docRes.ok) {
+          const contentType = docRes.headers.get("content-type") ?? "";
+          downloaded = Buffer.from(await docRes.arrayBuffer());
+          const looksLikePdf =
+            contentType.toLowerCase().includes("application/pdf") ||
+            downloaded.subarray(0, 5).toString("latin1") === "%PDF-";
+          isPdf = isPdf || looksLikePdf;
+        } else {
+          console.warn(`[send-media:${id}] não consegui baixar o documento pra checar o tipo [${docRes.status}]`);
+        }
+      } catch (fetchErr) {
+        console.error(`[send-media:${id}] falha ao baixar documento pra detecção de tipo`, (fetchErr as Error).message);
+      }
+
       content = {
         document: { url },
         fileName: filename,
@@ -76,18 +99,12 @@ messagesRouter.post("/sessions/:id/send-media", async (req, res) => {
         // renderizar a miniatura mesmo com jpegThumbnail presente.
         mimetype: isPdf ? "application/pdf" : "application/octet-stream",
       };
-      if (isPdf) {
+      if (isPdf && downloaded) {
         try {
-          const pdfRes = await fetch(url);
-          if (pdfRes.ok) {
-            const pdfBuffer = Buffer.from(await pdfRes.arrayBuffer());
-            const thumb = await pdfFirstPageThumbnail(pdfBuffer);
-            if (thumb) {
-              content.jpegThumbnail = thumb;
-              console.log(`[send-media:${id}] miniatura de PDF gerada (${thumb.length} bytes)`);
-            }
-          } else {
-            console.warn(`[send-media:${id}] não consegui baixar o PDF pra gerar miniatura [${pdfRes.status}]`);
+          const thumb = await pdfFirstPageThumbnail(downloaded);
+          if (thumb) {
+            content.jpegThumbnail = thumb;
+            console.log(`[send-media:${id}] miniatura de PDF gerada (${thumb.length} bytes)`);
           }
         } catch (thumbErr) {
           console.error(`[send-media:${id}] falha ao gerar miniatura do PDF`, (thumbErr as Error).message);
