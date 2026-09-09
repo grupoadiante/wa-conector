@@ -15,12 +15,21 @@ installRawSignalErrorWatch(() => {
   );
 });
 
+// Identificador de build — muda a cada versão que eu te mando, pra você
+// conseguir confirmar no log qual código está rodando de verdade, sem
+// depender de lembrar qual zip foi o último aplicado.
+const BUILD_VERSION = "2026-08-31-version-endpoint";
+
 const app = express();
 app.use(express.json({ limit: "10mb" }));
 
 // Healthcheck público (sem API key) — EasyPanel usa isso pra saber se o
 // container está de pé.
 app.get("/health", (_req, res) => res.json({ ok: true }));
+
+// Também público (sem API key) — pra confirmar por curl qual build está
+// rodando de verdade, sem precisar abrir o painel de logs do EasyPanel.
+app.get("/version", (_req, res) => res.json({ build: BUILD_VERSION }));
 
 app.use(requireApiKey);
 app.use(sessionsRouter);
@@ -31,11 +40,6 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
   console.error("[unhandled]", err);
   res.status(500).json({ error: "internal_error" });
 });
-
-// Identificador de build — muda a cada versão que eu te mando, pra você
-// conseguir confirmar no log qual código está rodando de verdade, sem
-// depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-08-31-raw-signal-error-watch";
 
 app.listen(config.port, () => {
   console.log(`wa-connector ouvindo na porta ${config.port} — build: ${BUILD_VERSION}`);
