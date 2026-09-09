@@ -20,6 +20,13 @@ const base = P({ level: "error" });
 const FAILURE_THRESHOLD = 3;
 const WINDOW_MS = 2 * 60 * 1000;
 
+// Tempo mínimo entre uma renegociação e a próxima PRO MESMO contato — sem
+// isso, se a renegociação falhar (ex: "Timed Out", como vimos hoje), as
+// próximas 3 falhas chegam quase na hora (o problema não foi resolvido) e
+// dispara nova tentativa imediatamente, virando um loop sem fim que nunca
+// dá tempo do WhatsApp responder.
+const COOLDOWN_MS = 60 * 1000;
+
 interface FailureState {
   count: number;
   windowStart: number;
@@ -41,12 +48,16 @@ export function createFailureTracker(
   onRepeatedFailure: (jid: string) => void
 ): FailureTracker {
   const failures = new Map<string, FailureState>();
+  const lastTrigger = new Map<string, number>();
 
   return {
     noteFailure(jid, reason) {
       if (!jid || typeof jid !== "string") return;
 
       const now = Date.now();
+      const last = lastTrigger.get(jid);
+      if (last && now - last < COOLDOWN_MS) return; // em cooldown, ignora
+
       const state = failures.get(jid);
       if (!state || now - state.windowStart > WINDOW_MS) {
         failures.set(jid, { count: 1, windowStart: now });
@@ -55,6 +66,7 @@ export function createFailureTracker(
       state.count += 1;
       if (state.count >= FAILURE_THRESHOLD) {
         failures.delete(jid);
+        lastTrigger.set(jid, now);
         console.warn(
           `[decrypt-watch:${sessionId}] ${FAILURE_THRESHOLD} falhas (${reason}) seguidas com ${jid} — renegociando sessão automaticamente`
         );
