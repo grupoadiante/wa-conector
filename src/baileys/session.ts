@@ -324,3 +324,15 @@ export async function releaseAllLocksForShutdown(): Promise<void> {
   const ids = [...live.keys()];
   await Promise.all(ids.map((id) => releaseLock(id)));
 }
+
+// Chamado pelo rawSignalErrorWatch quando uma rajada de erros crus do
+// libsignal (sem contato identificado) indica que o processo inteiro está
+// com estado de sessão degradado — reinicia tudo que está vivo agora.
+export async function restartAllLiveSessions(): Promise<void> {
+  const ids = [...live.keys()];
+  for (const id of ids) {
+    restartSession(id).catch((err) =>
+      console.error(`[raw-signal-watch] falha ao reiniciar sessão ${id}`, err)
+    );
+  }
+}

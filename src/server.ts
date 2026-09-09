@@ -4,7 +4,16 @@ import { requireApiKey } from "./authMiddleware";
 import { sessionsRouter } from "./routes/sessions";
 import { messagesRouter } from "./routes/messages";
 import { labelsRouter } from "./routes/labels";
-import { resumeAllSessions, releaseAllLocksForShutdown } from "./baileys/session";
+import { resumeAllSessions, releaseAllLocksForShutdown, restartAllLiveSessions } from "./baileys/session";
+import { installRawSignalErrorWatch } from "./baileys/rawSignalErrorWatch";
+
+// Precisa instalar ANTES de qualquer sessão iniciar, senão perde os
+// primeiros erros crus do libsignal (ver rawSignalErrorWatch.ts).
+installRawSignalErrorWatch(() => {
+  restartAllLiveSessions().catch((err) =>
+    console.error("[raw-signal-watch] falha ao reiniciar sessões", err)
+  );
+});
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -26,7 +35,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 // Identificador de build — muda a cada versão que eu te mando, pra você
 // conseguir confirmar no log qual código está rodando de verdade, sem
 // depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-08-31-pdf-magic-bytes";
+const BUILD_VERSION = "2026-08-31-raw-signal-error-watch";
 
 app.listen(config.port, () => {
   console.log(`wa-connector ouvindo na porta ${config.port} — build: ${BUILD_VERSION}`);
