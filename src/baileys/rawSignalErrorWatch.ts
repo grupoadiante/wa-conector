@@ -1,23 +1,32 @@
 // O libsignal (usado por baixo do Baileys) escreve alguns erros DIRETO no
 // console.error, sem passar pelo logger que a gente passa pro makeWASocket
-// (ver node_modules/libsignal/src/session_cipher.js linhas 157/159). Isso
-// significa que o decrypt-watch (que só escuta o logger) nunca vê esse
-// caso específico — quando TODAS as sessões conhecidas com um contato
-// falham ("Failed to decrypt message with any known session..."). Como
-// esse log não vem com o contato identificado (não dá pra saber qual JID),
-// a única resposta possível é: se virar uma rajada grande, é sinal de que
-// o estado de sessão do processo inteiro está degradado — reinicia a
-// sessão toda.
+// (ver node_modules/libsignal/src/session_cipher.js linhas 157/159). Por
+// isso o decrypt-watch normal (que só escuta o logger) nunca via esse caso.
+//
+// Só reiniciar a sessão inteira não resolve — a corrupção é por CONTATO,
+// não da sessão toda, e o WhatsApp reconecta com o mesmo estado corrompido
+// na hora. A correção de verdade é a mesma que já funciona pro caso normal:
+// assertSessions(jid, force=true) só com aquele contato.
+//
+// A pista: o stack trace do erro cru inclui o número like
+// "at async 554598261206.0 [as awaitable]" — dá pra extrair o contato de
+// lá e alimentar o mesmo failureTracker por-jid que o decrypt-watch usa.
 
-const WINDOW_MS = 10_000;
-const THRESHOLD = 20;
-const COOLDOWN_MS = 2 * 60 * 1000;
+const JID_IN_STACK = /at async (\d+)\.\d+ \[as awaitable\]/;
 
-let hits: number[] = [];
-let lastRestart = 0;
+export interface RawSignalErrorSink {
+  noteRawFailure(numericId: string): void;
+}
+
 let installed = false;
+const sinks = new Set<RawSignalErrorSink>();
 
-export function installRawSignalErrorWatch(onThresholdExceeded: () => void): void {
+export function registerRawSignalErrorSink(sink: RawSignalErrorSink): () => void {
+  sinks.add(sink);
+  return () => sinks.delete(sink);
+}
+
+export function installRawSignalErrorWatch(): void {
   if (installed) return;
   installed = true;
 
@@ -26,22 +35,15 @@ export function installRawSignalErrorWatch(onThresholdExceeded: () => void): voi
     originalError(...args);
 
     const text = args.map((a) => (typeof a === "string" ? a : "")).join(" ");
-    const isRawSignalError =
-      text.includes("Failed to decrypt message with any known session") ||
-      text.startsWith("Session error:");
-    if (!isRawSignalError) return;
+    const match = text.match(JID_IN_STACK);
+    if (!match) return;
 
-    const now = Date.now();
-    hits.push(now);
-    hits = hits.filter((t) => now - t <= WINDOW_MS);
-
-    if (hits.length >= THRESHOLD && now - lastRestart > COOLDOWN_MS) {
-      lastRestart = now;
-      hits = [];
-      originalError(
-        `[raw-signal-watch] ${THRESHOLD}+ erros crus de decriptação em ${WINDOW_MS / 1000}s — reiniciando sessão automaticamente`
-      );
-      onThresholdExceeded();
+    const numericId = match[1];
+    // Não sabe de qual sessão é (o console.error é global, várias sessões
+    // podem rodar no mesmo processo) — manda pra todas; a que não tiver
+    // esse contato simplesmente não encontra nada pra renegociar.
+    for (const sink of sinks) {
+      sink.noteRawFailure(numericId);
     }
   };
 }

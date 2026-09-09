@@ -15,10 +15,12 @@ import { downloadMedia, isDownloadableMedia } from "./media";
 import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCache";
 import { createDecryptWatchLogger, createFailureTracker } from "./decryptWatch";
 import { acquireLock, releaseLock } from "./lock";
+import { registerRawSignalErrorSink } from "./rawSignalErrorWatch";
 
 type Managed = {
   sock: WASocket;
   qrRetries: number;
+  unregisterRawSink: () => void;
 };
 
 // Sessões vivas neste processo. Se o container reiniciar, o Redis ainda tem
@@ -120,6 +122,13 @@ export async function startSession(id: string): Promise<SessionRecord> {
   });
   const sessionLogger = createDecryptWatchLogger(id, failureTracker);
 
+  // Liga o watcher de erros crus do libsignal (console.error direto, fora
+  // do logger) no mesmo tracker por-jid — assertSessions específico do
+  // contato, não reiniciar a sessão inteira à toa.
+  const unregisterRawSink = registerRawSignalErrorSink({
+    noteRawFailure: (numericId) => failureTracker.noteFailure(`${numericId}@s.whatsapp.net`, "raw_signal"),
+  });
+
   const sock = makeWASocket({
     version,
     auth: {
@@ -135,7 +144,7 @@ export async function startSession(id: string): Promise<SessionRecord> {
     getMessage: async (key) => getCachedMessage(key),
   });
 
-  live.set(id, { sock, qrRetries: 0 });
+  live.set(id, { sock, qrRetries: 0, unregisterRawSink });
 
   sock.ev.on("creds.update", saveCreds);
 
@@ -268,6 +277,7 @@ export async function startSession(id: string): Promise<SessionRecord> {
 export async function stopSession(id: string, wipe: boolean): Promise<void> {
   const managed = live.get(id);
   if (managed) {
+    managed.unregisterRawSink();
     managed.sock.ev.removeAllListeners("connection.update");
     try {
       if (wipe) {

@@ -4,21 +4,19 @@ import { requireApiKey } from "./authMiddleware";
 import { sessionsRouter } from "./routes/sessions";
 import { messagesRouter } from "./routes/messages";
 import { labelsRouter } from "./routes/labels";
-import { resumeAllSessions, releaseAllLocksForShutdown, restartAllLiveSessions } from "./baileys/session";
+import { resumeAllSessions, releaseAllLocksForShutdown } from "./baileys/session";
 import { installRawSignalErrorWatch } from "./baileys/rawSignalErrorWatch";
 
 // Precisa instalar ANTES de qualquer sessão iniciar, senão perde os
-// primeiros erros crus do libsignal (ver rawSignalErrorWatch.ts).
-installRawSignalErrorWatch(() => {
-  restartAllLiveSessions().catch((err) =>
-    console.error("[raw-signal-watch] falha ao reiniciar sessões", err)
-  );
-});
+// primeiros erros crus do libsignal (ver rawSignalErrorWatch.ts). A partir
+// de agora cada sessão se registra como "sink" (em session.ts) e o próprio
+// contato é renegociado (assertSessions), não a sessão inteira reiniciada.
+installRawSignalErrorWatch();
 
 // Identificador de build — muda a cada versão que eu te mando, pra você
 // conseguir confirmar no log qual código está rodando de verdade, sem
 // depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-08-31-version-endpoint";
+const BUILD_VERSION = "2026-08-31-raw-signal-targeted-fix";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
