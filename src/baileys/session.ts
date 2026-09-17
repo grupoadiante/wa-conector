@@ -6,7 +6,7 @@ import makeWASocket, {
   WAMessageStubType,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
-import { useRedisAuthState, clearRedisAuthState } from "./authState";
+import { useRedisAuthState, clearRedisAuthState, purgeJidSession } from "./authState";
 import { redis } from "../redis";
 import { sendWebhookEvent } from "../webhook";
 import { SessionRecord, SessionStatus } from "../types";
@@ -72,6 +72,28 @@ export async function isSessionHealthy(id: string): Promise<boolean> {
   return managed.sock.ws.isOpen;
 }
 
+// Apaga a sessão Signal corrompida de UM contato e força o Baileys a montar
+// uma limpa do zero. Usado tanto pela auto-cura (decrypt-watch/raw-signal)
+// quanto pelo endpoint POST /sessions/:id/purge-jid (chamado manualmente ou
+// pelo Lovable). `label` só identifica quem chamou, pro log.
+export async function purgeAndRenegotiate(
+  id: string,
+  jid: string,
+  label: string = "manual"
+): Promise<{ purged: number; fetched: boolean }> {
+  const managed = live.get(id);
+  if (!managed) throw new Error("sessão não está ativa neste processo");
+  const purged = await purgeJidSession(id, jid);
+  try {
+    const fetched = await managed.sock.assertSessions([jid], true);
+    console.log(`[${label}:${id}] sessão renegociada com ${jid} (purgado=${purged}, fetched=${fetched})`);
+    return { purged, fetched };
+  } catch (err) {
+    console.error(`[${label}:${id}] falha ao renegociar sessão com ${jid}`, (err as Error).message);
+    throw err;
+  }
+}
+
 export async function startSession(id: string): Promise<SessionRecord> {
   const existing = live.get(id);
   if (existing) return (await readRecord(id))!;
@@ -110,15 +132,10 @@ export async function startSession(id: string): Promise<SessionRecord> {
   // manual, como identificamos hoje. O tracker é compartilhado entre o
   // logger (falhas de decriptação de verdade) e o handler de mensagens
   // (mensagens "stub" vazias — ver comentário em decryptWatch.ts).
-  const failureTracker = createFailureTracker(id, async (jid) => {
-    const managed = live.get(id);
-    if (!managed) return;
-    try {
-      const fetched = await managed.sock.assertSessions([jid], true);
-      console.log(`[decrypt-watch:${id}] sessão renegociada com ${jid} (fetched=${fetched})`);
-    } catch (err) {
-      console.error(`[decrypt-watch:${id}] falha ao renegociar sessão com ${jid}`, (err as Error).message);
-    }
+  const failureTracker = createFailureTracker(id, (jid) => {
+    purgeAndRenegotiate(id, jid, "decrypt-watch").catch(() => {
+      /* já logado dentro de purgeAndRenegotiate */
+    });
   });
   const sessionLogger = createDecryptWatchLogger(id, failureTracker);
 

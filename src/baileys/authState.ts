@@ -80,6 +80,29 @@ export async function useRedisAuthState(sessionId: string): Promise<{
   };
 }
 
+// Apaga só a sessão Signal (session-{jid}*) de UM contato específico dentro
+// de uma sessão do WhatsApp — não mexe em credenciais nem em outros
+// contatos. Isso é a "auto-cura de verdade": em vez de só buscar chave nova
+// por cima de uma sessão corrompida (que às vezes ainda falha de novo),
+// apaga a corrompida primeiro e deixa o Baileys criar uma limpa do zero.
+export async function purgeJidSession(sessionId: string, jid: string): Promise<number> {
+  // O jid pode vir como "554598261206@s.whatsapp.net" ou "123@lid" — a
+  // chave no Redis usa só a parte numérica antes do @ (ex: "session-554598261206.0").
+  const numericId = jid.split("@")[0];
+  const pattern = `wa:${sessionId}:session-${numericId}*`;
+  const stream = redis.scanStream({ match: pattern });
+  const pipeline = redis.pipeline();
+  let count = 0;
+  for await (const keys of stream) {
+    for (const k of keys as string[]) {
+      pipeline.del(k);
+      count++;
+    }
+  }
+  if (count > 0) await pipeline.exec();
+  return count;
+}
+
 // Apaga toda a sessão do Redis — usado em logout real ou ao remover a conexão.
 export async function clearRedisAuthState(sessionId: string): Promise<void> {
   const stream = redis.scanStream({ match: `wa:${sessionId}:*` });

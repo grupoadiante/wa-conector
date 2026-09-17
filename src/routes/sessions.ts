@@ -3,6 +3,7 @@ import QRCode from "qrcode";
 import {
   getSessionRecord,
   listSessionIds,
+  purgeAndRenegotiate,
   restartSession,
   startSession,
   stopSession,
@@ -51,6 +52,24 @@ sessionsRouter.post("/sessions/:id/restart", async (req, res) => {
     res.json(record);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// Auto-cura sob demanda: apaga a sessão Signal corrompida de UM contato
+// (body: { jid: "554598261206@s.whatsapp.net" }) e força renegociação com
+// chave nova. Pensado pra ser chamado pelo Lovable/CRM quando um contato
+// fica preso, sem precisar abrir o console do Redis na mão.
+sessionsRouter.post("/sessions/:id/purge-jid", async (req, res) => {
+  const { id } = req.params;
+  const { jid } = req.body ?? {};
+  if (!jid || typeof jid !== "string") {
+    return res.status(400).json({ error: "jid é obrigatório no corpo (ex: 554598261206@s.whatsapp.net)" });
+  }
+  try {
+    const result = await purgeAndRenegotiate(id, jid, "purge-jid");
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
   }
 });
 

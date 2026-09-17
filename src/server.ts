@@ -16,7 +16,7 @@ installRawSignalErrorWatch();
 // Identificador de build — muda a cada versão que eu te mando, pra você
 // conseguir confirmar no log qual código está rodando de verdade, sem
 // depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-08-31-renegotiation-cooldown";
+const BUILD_VERSION = "2026-08-31-purge-jid-endpoint";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
