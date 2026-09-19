@@ -214,13 +214,16 @@ export async function startSession(id: string): Promise<SessionRecord> {
 
       // Queda recuperável (inclusive a que costuma seguir uma operação de
       // label): reconecta sozinho, sem exigir QR e sem intervenção humana.
+      // Jitter aleatório (2-15s) — se várias sessões caírem juntas (queda
+      // de rede, restart), evita que todas reconectem no mesmo instante.
       await writeRecord(id, { status: "failed" });
       await sendWebhookEvent(id, "session.status", { status: "failed", reason: "reconnecting" });
+      const reconnectDelay = 2000 + Math.floor(Math.random() * 13000);
       setTimeout(() => {
         startSession(id).catch((err) =>
           console.error(`[session:${id}] falha ao reconectar`, err)
         );
-      }, 2000);
+      }, reconnectDelay);
     }
   });
 
@@ -332,15 +335,26 @@ export async function restartSession(id: string): Promise<SessionRecord> {
 // novo — sem isso, a sessão fica com credenciais salvas no Redis mas nenhum
 // socket vivo, e todo envio falha com 409 até alguém notar. Aqui a gente
 // religa sozinho qualquer sessão que não estava explicitamente desconectada.
+// Espera aleatória (0 a 15s) — evita que 12+ sessões todas tentem religar
+// no mesmo instante depois de um restart/redeploy. Isso sozinho já causava
+// timeouts em cadeia (tanto no "init queries" do Baileys quanto em
+// renegociação de sessão), porque todas competiam pela mesma "porta de
+// entrada" do WhatsApp ao mesmo tempo.
+const MAX_RESUME_STAGGER_MS = 15_000;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export async function resumeAllSessions(): Promise<void> {
   const ids = await listSessionIds();
   for (const id of ids) {
     const record = await readRecord(id);
     if (!record || record.status === "disconnected") continue;
-    console.log(`[resume] religando sessão ${id} (status salvo: ${record.status})`);
-    startSession(id).catch((err) =>
-      console.error(`[resume] falha ao religar sessão ${id}`, err)
-    );
+    const delay = Math.floor(Math.random() * MAX_RESUME_STAGGER_MS);
+    console.log(`[resume] religando sessão ${id} em ${delay}ms (status salvo: ${record.status})`);
+    sleep(delay)
+      .then(() => startSession(id))
+      .catch((err) => console.error(`[resume] falha ao religar sessão ${id}`, err));
   }
 }
 
