@@ -101,3 +101,79 @@ export function createDecryptWatchLogger(sessionId: string, tracker: FailureTrac
 
   return wrap(base);
 }
+
+// "Socket zumbi": o WebSocket morreu de um jeito que o Baileys NUNCA emite
+// o evento connection.update com connection==="close" — então a reconexão
+// automática (em session.ts, no listener desse evento) nunca dispara. O
+// sintoma é "error in validating connection" (Connection Closed / WebSocket
+// Error) repetindo sem parar, às vezes por vários minutos, até alguém
+// reiniciar o container na mão. Esse watcher detecta a rajada e força um
+// restartSession() manual — sem depender do Baileys perceber a queda sozinho.
+const ZOMBIE_THRESHOLD = 8;
+const ZOMBIE_WINDOW_MS = 20_000;
+const ZOMBIE_COOLDOWN_MS = 2 * 60 * 1000;
+
+export interface ZombieSocketWatch {
+  noteConnectionError(): void;
+}
+
+export function createZombieSocketWatch(
+  sessionId: string,
+  onZombieDetected: () => void
+): ZombieSocketWatch {
+  let hits: number[] = [];
+  let lastTrigger = 0;
+
+  return {
+    noteConnectionError() {
+      const now = Date.now();
+      const sinceLastTrigger = now - lastTrigger;
+      if (lastTrigger && sinceLastTrigger < ZOMBIE_COOLDOWN_MS) return; // já reiniciou recente, espera
+
+      hits.push(now);
+      hits = hits.filter((t) => now - t <= ZOMBIE_WINDOW_MS);
+
+      if (hits.length >= ZOMBIE_THRESHOLD) {
+        hits = [];
+        lastTrigger = now;
+        console.warn(
+          `[zombie-watch:${sessionId}] ${ZOMBIE_THRESHOLD}+ erros de "Connection Closed" em ${ZOMBIE_WINDOW_MS / 1000}s sem reconexão automática — forçando reinício da sessão`
+        );
+        onZombieDetected();
+      }
+    },
+  };
+}
+
+export function createConnectionWatchLogger(
+  sessionId: string,
+  decryptTracker: FailureTracker,
+  zombieWatch: ZombieSocketWatch
+): ILogger {
+  function wrap(pinoLogger: any): ILogger {
+    return {
+      get level() {
+        return pinoLogger.level;
+      },
+      set level(v: string) {
+        pinoLogger.level = v;
+      },
+      child: (obj: Record<string, unknown>) => wrap(pinoLogger.child(obj)),
+      trace: (obj: unknown, msg?: string) => pinoLogger.trace(obj, msg),
+      debug: (obj: unknown, msg?: string) => pinoLogger.debug(obj, msg),
+      info: (obj: unknown, msg?: string) => pinoLogger.info(obj, msg),
+      warn: (obj: unknown, msg?: string) => pinoLogger.warn(obj, msg),
+      error: (obj: unknown, msg?: string) => {
+        if (msg === "failed to decrypt message") {
+          decryptTracker.noteFailure((obj as any)?.key?.remoteJid, "decrypt");
+        }
+        if (msg === "error in validating connection") {
+          zombieWatch.noteConnectionError();
+        }
+        pinoLogger.error(obj, msg);
+      },
+    } as ILogger;
+  }
+
+  return wrap(base.child({ sessionId }));
+}

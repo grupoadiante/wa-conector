@@ -13,7 +13,7 @@ import { SessionRecord, SessionStatus } from "../types";
 import { upsertLabelInStore, setChatLabelAssociation } from "./labelStore";
 import { downloadMedia, isDownloadableMedia } from "./media";
 import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCache";
-import { createDecryptWatchLogger, createFailureTracker } from "./decryptWatch";
+import { createConnectionWatchLogger, createFailureTracker, createZombieSocketWatch } from "./decryptWatch";
 import { acquireLock, releaseLock } from "./lock";
 import { registerRawSignalErrorSink } from "./rawSignalErrorWatch";
 
@@ -137,7 +137,12 @@ export async function startSession(id: string): Promise<SessionRecord> {
       /* já logado dentro de purgeAndRenegotiate */
     });
   });
-  const sessionLogger = createDecryptWatchLogger(id, failureTracker);
+  const zombieWatch = createZombieSocketWatch(id, () => {
+    restartSession(id).catch((err) =>
+      console.error(`[zombie-watch:${id}] falha ao reiniciar sessão`, err)
+    );
+  });
+  const sessionLogger = createConnectionWatchLogger(id, failureTracker, zombieWatch);
 
   // Liga o watcher de erros crus do libsignal (console.error direto, fora
   // do logger) no mesmo tracker por-jid — assertSessions específico do
