@@ -36,6 +36,14 @@ export interface FailureTracker {
   noteFailure(jid: string | undefined | null, reason: string): void;
 }
 
+// Guardado no módulo (fora da closure de createFailureTracker) e indexado
+// por sessão+contato — de propósito. Se guardasse dentro da closure, uma
+// reconexão da sessão (que cria um tracker novo do zero) apagaria a
+// memória do cooldown e o limite de 60s deixaria de valer bem na hora que
+// mais importa: durante uma instabilidade, quando a sessão reconecta
+// repetidas vezes.
+const globalLastTrigger = new Map<string, number>();
+
 // Cobre dois casos bem diferentes, que precisam contar pro mesmo limite:
 // 1) Falha de decriptação Signal de verdade (erro no log do Baileys,
 //    "failed to decrypt message" — Bad MAC, No session record, etc).
@@ -48,14 +56,14 @@ export function createFailureTracker(
   onRepeatedFailure: (jid: string) => void
 ): FailureTracker {
   const failures = new Map<string, FailureState>();
-  const lastTrigger = new Map<string, number>();
 
   return {
     noteFailure(jid, reason) {
       if (!jid || typeof jid !== "string") return;
 
       const now = Date.now();
-      const last = lastTrigger.get(jid);
+      const cooldownKey = `${sessionId}:${jid}`;
+      const last = globalLastTrigger.get(cooldownKey);
       if (last && now - last < COOLDOWN_MS) return; // em cooldown, ignora
 
       const state = failures.get(jid);
@@ -66,7 +74,7 @@ export function createFailureTracker(
       state.count += 1;
       if (state.count >= FAILURE_THRESHOLD) {
         failures.delete(jid);
-        lastTrigger.set(jid, now);
+        globalLastTrigger.set(cooldownKey, now);
         console.warn(
           `[decrypt-watch:${sessionId}] ${FAILURE_THRESHOLD} falhas (${reason}) seguidas com ${jid} — renegociando sessão automaticamente`
         );
