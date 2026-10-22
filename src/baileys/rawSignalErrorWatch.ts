@@ -16,6 +16,15 @@ const JID_IN_STACK = /at async (\d+)\.\d+ \[as awaitable\]/;
 
 export interface RawSignalErrorSink {
   noteRawFailure(numericId: string): void;
+  // Chamado quando o disjuntor desiste de um contato (ver GIVE_UP_THRESHOLD
+  // abaixo) — cada sessão que reconhecer esse contato deve bloqueá-lo de
+  // verdade no WhatsApp (sock.updateBlockStatus), não só parar de renegociar.
+  // Renegociar nunca resolve esse tipo de contato (ver comentário mais
+  // abaixo), e mesmo sem renegociar, CADA mensagem nova dele ainda custa
+  // caro pro libsignal tentar (até 2000 derivações de chave antes de
+  // desistir) — só bloquear no WhatsApp para a entrega de vez e elimina
+  // esse custo.
+  giveUpOn?(numericId: string): void;
 }
 
 let installed = false;
@@ -73,8 +82,11 @@ export function installRawSignalErrorWatch(): void {
       givenUpUntil.set(numericId, now + GIVE_UP_COOLDOWN_MS);
       dispatchHits.delete(numericId);
       console.warn(
-        `[raw-signal-watch] contato ${numericId} gerou mais de ${GIVE_UP_THRESHOLD} erros crus em ${GIVE_UP_WINDOW_MS / 1000}s mesmo com renegociação — parece um número incompatível com o protocolo (ex: disparo em massa). Pausando auto-cura desse contato por ${GIVE_UP_COOLDOWN_MS / 60000}min pra não sobrecarregar o servidor; as outras sessões continuam normais.`
+        `[raw-signal-watch] contato ${numericId} gerou mais de ${GIVE_UP_THRESHOLD} erros crus em ${GIVE_UP_WINDOW_MS / 1000}s mesmo com renegociação — parece um número incompatível com o protocolo (ex: disparo em massa). Bloqueando esse contato em todas as sessões que o conhecem (e pausando auto-cura por ${GIVE_UP_COOLDOWN_MS / 60000}min); as outras sessões/contatos continuam normais.`
       );
+      for (const sink of sinks) {
+        sink.giveUpOn?.(numericId);
+      }
       return;
     }
     dispatchHits.set(numericId, hits);

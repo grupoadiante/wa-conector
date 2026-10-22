@@ -149,6 +149,20 @@ export async function startSession(id: string): Promise<SessionRecord> {
   // contato, não reiniciar a sessão inteira à toa.
   const unregisterRawSink = registerRawSignalErrorSink({
     noteRawFailure: (numericId) => failureTracker.noteFailure(`${numericId}@s.whatsapp.net`, "raw_signal"),
+    giveUpOn: (numericId) => {
+      const managed = live.get(id);
+      if (!managed) return;
+      // Bloqueia nas duas formas de JID que esse contato pode ter (número
+      // normal e o identificador "lid") — só uma delas costuma existir de
+      // verdade pro Baileys, a outra falha silenciosa e sem problema.
+      for (const suffix of ["@s.whatsapp.net", "@lid"]) {
+        const jid = `${numericId}${suffix}`;
+        managed.sock.updateBlockStatus(jid, "block").catch(() => {
+          /* contato pode não existir nessa forma de JID nesta sessão — ok */
+        });
+      }
+      console.warn(`[session:${id}] contato ${numericId} bloqueado automaticamente (incompatível com o protocolo)`);
+    },
   });
 
   const sock = makeWASocket({
