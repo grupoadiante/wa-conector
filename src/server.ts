@@ -6,17 +6,19 @@ import { messagesRouter } from "./routes/messages";
 import { labelsRouter } from "./routes/labels";
 import { resumeAllSessions, releaseAllLocksForShutdown } from "./baileys/session";
 import { installRawSignalErrorWatch } from "./baileys/rawSignalErrorWatch";
+import { installLibsignalGuard, getQuarantinedContacts } from "./baileys/libsignalGuard";
 
 // Precisa instalar ANTES de qualquer sessão iniciar, senão perde os
 // primeiros erros crus do libsignal (ver rawSignalErrorWatch.ts). A partir
 // de agora cada sessão se registra como "sink" (em session.ts) e o próprio
 // contato é renegociado (assertSessions), não a sessão inteira reiniciada.
 installRawSignalErrorWatch();
+installLibsignalGuard();
 
 // Identificador de build — muda a cada versão que eu te mando, pra você
 // conseguir confirmar no log qual código está rodando de verdade, sem
 // depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-10-22-auto-block-incompatible-contact";
+const BUILD_VERSION = "2026-11-05-libsignal-guard";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -27,7 +29,9 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 
 // Também público (sem API key) — pra confirmar por curl qual build está
 // rodando de verdade, sem precisar abrir o painel de logs do EasyPanel.
-app.get("/version", (_req, res) => res.json({ build: BUILD_VERSION }));
+app.get("/version", (_req, res) =>
+  res.json({ build: BUILD_VERSION, quarantined: getQuarantinedContacts(), rssMB: Math.round(process.memoryUsage().rss / 1048576) })
+);
 
 app.use(requireApiKey);
 app.use(sessionsRouter);
