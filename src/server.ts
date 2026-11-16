@@ -7,6 +7,8 @@ import { labelsRouter } from "./routes/labels";
 import { resumeAllSessions, releaseAllLocksForShutdown } from "./baileys/session";
 import { installRawSignalErrorWatch } from "./baileys/rawSignalErrorWatch";
 import { installLibsignalGuard, getQuarantinedContacts } from "./baileys/libsignalGuard";
+import { installEventLoopWatchdog } from "./baileys/eventLoopWatchdog";
+import { installResourceLog } from "./baileys/resourceLog";
 
 // Precisa instalar ANTES de qualquer sessão iniciar, senão perde os
 // primeiros erros crus do libsignal (ver rawSignalErrorWatch.ts). A partir
@@ -14,11 +16,13 @@ import { installLibsignalGuard, getQuarantinedContacts } from "./baileys/libsign
 // contato é renegociado (assertSessions), não a sessão inteira reiniciada.
 installRawSignalErrorWatch();
 installLibsignalGuard();
+installEventLoopWatchdog();
+installResourceLog();
 
 // Identificador de build — muda a cada versão que eu te mando, pra você
 // conseguir confirmar no log qual código está rodando de verdade, sem
 // depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-11-05-libsignal-guard";
+const BUILD_VERSION = "2026-11-16-resource-log";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
