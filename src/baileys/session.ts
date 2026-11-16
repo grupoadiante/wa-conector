@@ -16,6 +16,7 @@ import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCa
 import { createConnectionWatchLogger, createFailureTracker, createZombieSocketWatch } from "./decryptWatch";
 import { acquireLock, releaseLock } from "./lock";
 import { registerRawSignalErrorSink } from "./rawSignalErrorWatch";
+import { noteSessionClose } from "./resourceLog";
 
 type Managed = {
   sock: WASocket;
@@ -220,6 +221,9 @@ export async function startSession(id: string): Promise<SessionRecord> {
     if (connection === "close") {
       const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
       const loggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 403;
+
+      noteSessionClose(statusCode);
+      console.warn(`[session:${id}] conexão fechada (código ${statusCode ?? "?"}): ${(lastDisconnect?.error as Error)?.message ?? "sem detalhe"}`);
 
       live.delete(id);
 

@@ -25,6 +25,17 @@ function hostMemAvailableMB(): number | null {
 
 const mb = (n: number | null) => (n === null ? "?" : Math.round(n / 1048576));
 
+let closesThisMinute = 0;
+const closeCodes = new Map<string, number>();
+// Chamado a cada connection "close" de qualquer sessão — conta por código
+// (428 = conexão fechada, 440 = substituída por outro login, 515 = restart
+// necessário, 401 = deslogado...). Aparece na linha [stats] do minuto.
+export function noteSessionClose(code: unknown): void {
+  closesThisMinute++;
+  const k = String(code ?? "?");
+  closeCodes.set(k, (closeCodes.get(k) ?? 0) + 1);
+}
+
 export function installResourceLog(): void {
   const INTERVAL_MS = 60_000;
   let expected = Date.now() + INTERVAL_MS;
@@ -34,7 +45,9 @@ export function installResourceLog(): void {
     const m = process.memoryUsage();
     const cg = readNum("/sys/fs/cgroup/memory.current");
     console.log(
-      `[stats] rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}MB ext=${mb(m.external)}MB buf=${mb(m.arrayBuffers)}MB cgroup=${mb(cg)}MB hostAvail=${hostMemAvailableMB() ?? "?"}MB lag=${lag}ms up=${Math.round(process.uptime() / 60)}min`
+      `[stats] rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}MB ext=${mb(m.external)}MB buf=${mb(m.arrayBuffers)}MB cgroup=${mb(cg)}MB hostAvail=${hostMemAvailableMB() ?? "?"}MB lag=${lag}ms up=${Math.round(process.uptime() / 60)}min closes=${closesThisMinute} codes=${JSON.stringify(Object.fromEntries(closeCodes))}`
     );
+    closesThisMinute = 0;
+    closeCodes.clear();
   }, INTERVAL_MS).unref();
 }
