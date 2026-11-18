@@ -4,6 +4,8 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   WAMessageStubType,
+  jidNormalizedUser,
+  proto,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import { useRedisAuthState, clearRedisAuthState, purgeJidSession } from "./authState";
@@ -551,6 +553,33 @@ export async function resyncLabels(id: string): Promise<{ before: number; after:
   }
   console.log(`[labels:${id}] etiquetas relidas do WhatsApp (antes=${before}, depois=${after})`);
   return { before, after };
+}
+
+// Recuperação MANUAL do estado de etiquetas — nunca é chamada sozinha.
+// Avisa o celular que este dispositivo não consegue ler o estado
+// (APP_STATE_FATAL_EXCEPTION_NOTIFICATION, o mesmo aviso do WhatsApp Web).
+// Efeito observado em 18/11 no 3934: o celular DESVINCULA esta linha e gera
+// um estado novo; depois é preciso recriar a linha de etiquetas e ler o QR.
+// A conexão principal (atendimento) não é afetada.
+export async function requestLabelStateRecovery(id: string): Promise<void> {
+  const managed = live.get(id);
+  if (!managed || !managed.sock.ws.isOpen) throw new Error("session_not_connected");
+  const me = managed.sock.user?.id;
+  if (!me) throw new Error("session_not_connected");
+  await managed.sock.relayMessage(
+    jidNormalizedUser(me),
+    {
+      protocolMessage: {
+        type: proto.Message.ProtocolMessage.Type.APP_STATE_FATAL_EXCEPTION_NOTIFICATION,
+        appStateFatalExceptionNotification: {
+          collectionNames: ["regular", "regular_high", "regular_low", "critical_block", "critical_unblock_low"],
+          timestamp: Date.now(),
+        },
+      },
+    } as any,
+    { additionalAttributes: { category: "peer", push_priority: "high_force" } } as any
+  );
+  console.log(`[labels:${id}] recuperação manual: aviso enviado ao celular (a linha deve ser desvinculada)`);
 }
 
 export function getLastLabelResync(id: string): number {

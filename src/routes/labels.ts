@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { resyncLabels } from "../baileys/session";
+import { resyncLabels, requestLabelStateRecovery } from "../baileys/session";
 import { applyLabel, removeLabel, upsertLabelDefinition, httpStatusFor, httpStatusForError, clearLabelBlock } from "../baileys/labels";
 import { listLabelsFromStore, listChatLabels } from "../baileys/labelStore";
 import { toJid } from "../jid";
@@ -42,6 +42,31 @@ labelsRouter.post("/sessions/:id/labels/resync", async (req, res) => {
           }
         : {}),
     });
+  }
+});
+
+// Recuperação MANUAL para linha bloqueada por 403. Exige {"confirm":"desvincular"}
+// no corpo, porque o celular desvincula esta linha ao receber o aviso. Depois:
+// recriar a linha de etiquetas no CRM e ler o QR de novo.
+labelsRouter.post("/sessions/:id/labels/recover", async (req, res) => {
+  const { id } = req.params;
+  if ((req.body as { confirm?: string })?.confirm !== "desvincular") {
+    return res.status(400).json({
+      ok: false,
+      error: "confirm_required",
+      hint: 'Este comando faz o celular desvincular esta linha de etiquetas. Envie {"confirm":"desvincular"} para prosseguir.',
+    });
+  }
+  try {
+    await requestLabelStateRecovery(id);
+    res.json({
+      ok: true,
+      requested: true,
+      next: "A linha deve cair em até 1 minuto. Recrie a linha de etiquetas no CRM, leia o QR e confira etiquetas > 0 no /sessions-health.",
+    });
+  } catch (err) {
+    const message = (err as Error).message || "recover_failed";
+    res.status(httpStatusForError(message)).json({ ok: false, error: message });
   }
 });
 
