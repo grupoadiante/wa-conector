@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { resyncLabels, requestLabelStateRecovery } from "../baileys/session";
+import { resyncLabels } from "../baileys/session";
 import { applyLabel, removeLabel, upsertLabelDefinition, httpStatusFor, httpStatusForError, clearLabelBlock } from "../baileys/labels";
 import { listLabelsFromStore, listChatLabels } from "../baileys/labelStore";
 import { toJid } from "../jid";
@@ -32,38 +32,16 @@ labelsRouter.post("/sessions/:id/labels/resync", async (req, res) => {
   } catch (err) {
     const message = (err as Error).message || "resync_failed";
     console.warn(`[labels:${id}] releitura manual falhou: ${message}`);
-    // 403 = o arquivo de estado guardado no WhatsApp venceu. Pede ao celular
-    // que gere um novo; quem chamou repete a releitura em seguida.
-    let recovery_requested = false;
-    if (/status code 403/i.test(message)) {
-      try {
-        await requestLabelStateRecovery(id);
-        recovery_requested = true;
-      } catch (e) {
-        console.warn(`[labels:${id}] não consegui pedir recuperação ao celular: ${(e as Error).message}`);
-      }
-    }
+    const blocked = /status code 403/i.test(message);
     res.status(httpStatusForError(message)).json({
       ok: false,
       error: message,
-      recovery_requested,
-      ...(recovery_requested
-        ? { hint: "Pedido de recuperação enviado ao celular. Deixe o WhatsApp aberto no aparelho e repita a releitura em 1 a 2 minutos." }
+      ...(blocked
+        ? {
+            hint: "O arquivo de estado desta conta venceu no WhatsApp. Parear de novo só a linha de etiquetas não resolve: no celular, saia de TODOS os dispositivos conectados e pareie de novo a conexão principal e a linha de etiquetas.",
+          }
         : {}),
     });
-  }
-});
-
-// Pede ao celular que regenere o estado de etiquetas (use quando a releitura
-// devolver 403). Depois chame /labels/resync.
-labelsRouter.post("/sessions/:id/labels/recover", async (req, res) => {
-  const { id } = req.params;
-  try {
-    await requestLabelStateRecovery(id);
-    res.json({ ok: true, requested: true });
-  } catch (err) {
-    const message = (err as Error).message || "recover_failed";
-    res.status(httpStatusForError(message)).json({ ok: false, error: message });
   }
 });
 
