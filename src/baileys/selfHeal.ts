@@ -47,6 +47,8 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 export interface SessionHealth {
   id: string;
+  // número do WhatsApp pareado nesta sessão (só quando conectada)
+  phone: string | null;
   status: string;
   mode: string;
   paired: boolean;
@@ -66,8 +68,10 @@ export interface SessionHealth {
 export async function describeSession(id: string, rec?: SessionRecord | null): Promise<SessionHealth> {
   const record = rec === undefined ? await getSessionRecord(id) : rec;
   const info = getLiveInfo(id);
+  const meId = getLiveSocket(id)?.user?.id ?? "";
   return {
     id,
+    phone: meId ? meId.split("@")[0].split(":")[0] : null,
     status: record?.status ?? "missing",
     mode: info?.mode ?? record?.mode ?? config.defaultSessionMode,
     paired: record?.paired ?? (await isSessionPaired(id)),

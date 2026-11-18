@@ -46,15 +46,15 @@ labelsRouter.post("/sessions/:id/labels/resync", async (req, res) => {
 });
 
 // Recuperação MANUAL para linha bloqueada por 403. Exige {"confirm":"desvincular"}
-// no corpo, porque o celular desvincula esta linha ao receber o aviso. Depois:
-// recriar a linha de etiquetas no CRM e ler o QR de novo.
+// no corpo, porque o celular desconecta TODOS os dispositivos do número ao
+// receber o aviso (a conexão principal cai junto).
 labelsRouter.post("/sessions/:id/labels/recover", async (req, res) => {
   const { id } = req.params;
   if ((req.body as { confirm?: string })?.confirm !== "desvincular") {
     return res.status(400).json({
       ok: false,
       error: "confirm_required",
-      hint: 'Este comando faz o celular desvincular esta linha de etiquetas. Envie {"confirm":"desvincular"} para prosseguir.',
+      hint: 'Este comando faz o celular desconectar TODOS os dispositivos do numero, inclusive a conexao principal (o atendimento para ate ler o QR de novo). Envie {"confirm":"desvincular"} para prosseguir.',
     });
   }
   try {
@@ -62,7 +62,7 @@ labelsRouter.post("/sessions/:id/labels/recover", async (req, res) => {
     res.json({
       ok: true,
       requested: true,
-      next: "A linha deve cair em até 1 minuto. Recrie a linha de etiquetas no CRM, leia o QR e confira etiquetas > 0 no /sessions-health.",
+      next: "Em até 1 minuto o celular desconecta todos os dispositivos do número. Reconecte a conexão principal no CRM SEM apagá-la, recrie só a linha de etiquetas, leia o QR e confira etiquetas > 0 no /sessions-health.",
     });
   } catch (err) {
     const message = (err as Error).message || "recover_failed";

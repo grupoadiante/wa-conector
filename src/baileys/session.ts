@@ -558,9 +558,10 @@ export async function resyncLabels(id: string): Promise<{ before: number; after:
 // Recuperação MANUAL do estado de etiquetas — nunca é chamada sozinha.
 // Avisa o celular que este dispositivo não consegue ler o estado
 // (APP_STATE_FATAL_EXCEPTION_NOTIFICATION, o mesmo aviso do WhatsApp Web).
-// Efeito observado em 18/11 no 3934: o celular DESVINCULA esta linha e gera
-// um estado novo; depois é preciso recriar a linha de etiquetas e ler o QR.
-// A conexão principal (atendimento) não é afetada.
+// Efeito observado em 18/11 (3934 e 7930): o celular DESCONECTA TODOS os
+// dispositivos do número — inclusive a conexão principal (atendimento) — e
+// gera um estado novo. Depois é preciso reconectar a principal (sem apagar a
+// conexão no CRM) e recriar a linha de etiquetas.
 export async function requestLabelStateRecovery(id: string): Promise<void> {
   const managed = live.get(id);
   if (!managed || !managed.sock.ws.isOpen) throw new Error("session_not_connected");
@@ -579,7 +580,7 @@ export async function requestLabelStateRecovery(id: string): Promise<void> {
     } as any,
     { additionalAttributes: { category: "peer", push_priority: "high_force" } } as any
   );
-  console.log(`[labels:${id}] recuperação manual: aviso enviado ao celular (a linha deve ser desvinculada)`);
+  console.log(`[labels:${id}] recuperação manual: aviso enviado ao celular (TODOS os dispositivos do número serão desconectados)`);
 }
 
 export function getLastLabelResync(id: string): number {

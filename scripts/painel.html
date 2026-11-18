@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel do servidor de etiquetas</title>
+<style>
+  :root {
+    --bg: #f4f5f2; --card: #ffffff; --ink: #1c211d; --muted: #667069; --line: #dfe3dc;
+    --accent: #1f6f4a; --accent-ink: #ffffff; --warn: #a15c00; --warn-bg: #fff4dc;
+    --bad: #a3271f; --bad-bg: #fde9e6; --ok: #1f6f4a; --ok-bg: #e2f3ea; --code: #f0f2ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #141815; --card: #1c221e; --ink: #e8ece8; --muted: #98a39b; --line: #2e3731;
+      --accent: #58c08b; --accent-ink: #0d1510; --warn: #f0b860; --warn-bg: #3a2c12;
+      --bad: #ff8f85; --bad-bg: #3c1a17; --ok: #58c08b; --ok-bg: #14301f; --code: #131714;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  section { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px; margin-bottom: 16px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  input, select { width: 100%; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px;
+    background: var(--bg); color: var(--ink); font: inherit; }
+  button { padding: 8px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg);
+    color: var(--ink); font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.danger { color: var(--bad); border-color: var(--bad); }
+  button.small { padding: 4px 8px; font-size: 13px; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+  .row > div { flex: 1 1 160px; }
+  .row > .fit { flex: 0 0 auto; }
+  .stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .stat { flex: 1 1 130px; border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+  .stat b { display: block; font-size: 20px; }
+  .stat span { font-size: 13px; color: var(--muted); }
+  .scroll { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { font-size: 12px; color: var(--muted); font-weight: 600; }
+  td.actions { white-space: normal; }
+  td.actions button { margin: 2px 4px 2px 0; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; }
+  .pill.ok { background: var(--ok-bg); color: var(--ok); }
+  .pill.bad { background: var(--bad-bg); color: var(--bad); }
+  .pill.warn { background: var(--warn-bg); color: var(--warn); }
+  .note { background: var(--warn-bg); color: var(--warn); border-radius: 8px; padding: 10px 12px;
+    font-size: 14px; margin: 10px 0 0; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 12px;
+    margin: 0; max-height: 340px; overflow: auto; font: 13px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    white-space: pre-wrap; word-break: break-word; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
+  dialog { border: 1px solid var(--line); border-radius: 10px; background: var(--card); color: var(--ink);
+    max-width: 480px; padding: 18px; }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Painel do servidor de etiquetas</h1>
+  <p class="sub">Tudo o que era feito pelo terminal, em botões. Os comandos saem direto desta página para o conector.</p>
+
+  <section>
+    <h2>1. Chave de acesso</h2>
+    <div class="row">
+      <div><label for="key">CONNECTOR_API_KEY (a mesma do EasyPanel)</label>
+        <input id="key" type="password" autocomplete="off" placeholder="cole a chave aqui"></div>
+      <div class="fit"><button class="primary" id="btnConnect">Conectar</button></div>
+      <div class="fit"><button id="btnForget">Esquecer chave</button></div>
+    </div>
+    <p class="muted" id="keyInfo">A chave fica só nesta aba do navegador e some quando a aba é fechada. Ela nunca é gravada no servidor nem enviada a outro lugar.</p>
+  </section>
+
+  <section>
+    <h2>2. Situação das linhas</h2>
+    <div class="stats">
+      <div class="stat"><b id="sVersion">–</b><span>versão</span></div>
+      <div class="stat"><b id="sConnected">–</b><span>linhas conectadas</span></div>
+      <div class="stat"><b id="sBlocked">–</b><span>bloqueadas (403)</span></div>
+      <div class="stat"><b id="sOrphans">–</b><span>sem pareamento</span></div>
+    </div>
+    <div class="row" style="margin-bottom:12px">
+      <div class="fit"><button class="primary" id="btnRefresh">Atualizar</button></div>
+      <div class="fit"><button id="btnHeal">Rodar auto-cura agora</button></div>
+      <div class="fit"><label style="margin:0"><input type="checkbox" id="auto" style="width:auto"> atualizar a cada 30 s</label></div>
+      <div class="fit"><label style="margin:0"><input type="checkbox" id="showOrphans" style="width:auto"> mostrar sessões sem pareamento</label></div>
+    </div>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Número</th><th>Sessão</th><th>Conexão</th><th>Chaves</th><th>Etiquetas</th><th>Estado</th><th>Ações</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="7" class="muted">Informe a chave e clique em Conectar.</td></tr></tbody>
+      </table>
+    </div>
+    <p class="muted" style="margin:10px 0 0">Linha pronta para etiquetar: conectada, com chaves, etiquetas maior que zero e sem bloqueio.</p>
+  </section>
+
+  <section>
+    <h2>3. Testar etiqueta em uma conversa</h2>
+    <div class="row">
+      <div><label for="tSession">Linha</label><select id="tSession"></select></div>
+      <div><label for="tPhone">Número do contato (com 55)</label><input id="tPhone" inputmode="numeric" placeholder="554588286965"></div>
+      <div><label for="tLabel">Etiqueta</label><select id="tLabel"><option value="">carregue a lista</option></select></div>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <div class="fit"><button id="btnLoadLabels">Carregar etiquetas da linha</button></div>
+      <div class="fit"><button class="primary" id="btnApply">Aplicar</button></div>
+      <div class="fit"><button id="btnRemove">Remover</button></div>
+      <div class="fit"><button id="btnChat">Ver etiquetas da conversa</button></div>
+    </div>
+    <p class="note">Números de DDD acima de 30 costumam estar no WhatsApp sem o nono dígito (ex.: 554588286965, e não 5545988286965). Com o número errado o WhatsApp responde "ok" e nada aparece no celular.</p>
+  </section>
+
+  <section>
+    <h2>4. Criar etiqueta em uma linha</h2>
+    <div class="row">
+      <div><label for="cSession">Linha</label><select id="cSession"></select></div>
+      <div><label for="cName">Nome</label><input id="cName" value="Venda confirmada"></div>
+      <div class="fit"><button id="btnCreate">Criar</button></div>
+    </div>
+    <p class="muted" style="margin:10px 0 0">O número interno é escolhido automaticamente (o próximo livre). O Backster já cria a etiqueta sozinho na primeira venda; use isto só para testar.</p>
+  </section>
+
+  <section>
+    <h2>Resultado dos comandos</h2>
+    <pre id="log">Nenhum comando executado ainda.</pre>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <h2 id="dlgTitle"></h2>
+  <p id="dlgText"></p>
+  <div id="dlgTypeWrap"><label for="dlgType" id="dlgTypeLabel"></label><input id="dlgType" autocomplete="off"></div>
+  <div class="row" style="margin-top:14px; justify-content:flex-end">
+    <div class="fit"><button id="dlgCancel">Cancelar</button></div>
+    <div class="fit"><button class="danger" id="dlgOk">Confirmar</button></div>
+  </div>
+</dialog>
+
+<script>
+(function () {
+  var $ = function (id) { return document.getElementById(id); };
+  var key = "";
+  var sessions = [];
+  var timer = null;
+
+  try { key = sessionStorage.getItem("wa_key") || ""; } catch (e) {}
+  if (key) $("key").value = key;
+
+  function log(title, data) {
+    var t = new Date().toLocaleTimeString("pt-BR");
+    var body = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+    $("log").textContent = "[" + t + "] " + title + "\n" + body + "\n\n" + $("log").textContent.slice(0, 12000);
+  }
+
+  function api(method, path, body) {
+    if (!key) { log("Sem chave", "Informe a chave no passo 1."); return Promise.reject(new Error("no_key")); }
+    var opt = { method: method, headers: { "X-Api-Key": key } };
+    if (body !== undefined) { opt.headers["Content-Type"] = "application/json"; opt.body = JSON.stringify(body); }
+    return fetch(path, opt).then(function (res) {
+      return res.text().then(function (text) {
+        var data;
+        try { data = JSON.parse(text); } catch (e) {
+          data = { erro: "resposta não é JSON (HTTP " + res.status + "). Se for uma página do EasyPanel, o conector está reiniciando." };
+        }
+        return { ok: res.ok, status: res.status, data: data };
+      });
+    });
+  }
+
+  function run(title, method, path, body) {
+    return api(method, path, body).then(function (r) {
+      log(title + " — HTTP " + r.status, r.data);
+      return r;
+    }).catch(function (e) {
+      if (e.message !== "no_key") log(title + " — falha de rede", String(e.message || e));
+      throw e;
+    });
+  }
+
+  function confirmDialog(title, text, typeWord) {
+    return new Promise(function (resolve) {
+      $("dlgTitle").textContent = title;
+      $("dlgText").textContent = text;
+      $("dlgTypeWrap").style.display = typeWord ? "block" : "none";
+      $("dlgTypeLabel").textContent = typeWord ? 'Digite "' + typeWord + '" para confirmar' : "";
+      $("dlgType").value = "";
+      var done = function (v) { $("dlg").close(); $("dlgOk").onclick = null; $("dlgCancel").onclick = null; resolve(v); };
+      $("dlgOk").onclick = function () {
+        if (typeWord && $("dlgType").value.trim().toLowerCase() !== typeWord) return;
+        done(true);
+      };
+      $("dlgCancel").onclick = function () { done(false); };
+      $("dlg").showModal();
+    });
+  }
+
+  function short(id) { return id.replace(/^org_[a-z0-9]+_/, ""); }
+  function pill(text, cls) { var s = document.createElement("span"); s.className = "pill " + cls; s.textContent = text; return s; }
+  function cell(content, cls) {
+    var td = document.createElement("td");
+    if (cls) td.className = cls;
+    if (content instanceof Node) td.appendChild(content); else td.textContent = content;
+    return td;
+  }
+  function btn(text, cls, fn) {
+    var b = document.createElement("button");
+    b.className = "small" + (cls ? " " + cls : ""); b.textContent = text; b.onclick = fn; return b;
+  }
+
+  function fillSelect(sel, list) {
+    var old = sel.value;
+    sel.textContent = "";
+    list.forEach(function (s) {
+      var o = document.createElement("option");
+      o.value = s.id;
+      o.textContent = (s.phone ? "final " + String(s.phone).slice(-4) + " · " : "") + short(s.id);
+      sel.appendChild(o);
+    });
+    if (old) sel.value = old;
+  }
+
+  function render(health) {
+    sessions = health.sessions || [];
+    var paired = sessions.filter(function (s) { return s.paired; });
+    var orphans = sessions.filter(function (s) { return !s.paired; });
+    var blocked = paired.filter(function (s) { return s.labels_blocked; });
+    $("sConnected").textContent = paired.filter(function (s) { return s.ws_open; }).length + " de " + paired.length;
+    $("sBlocked").textContent = blocked.length;
+    $("sOrphans").textContent = orphans.length;
+
+    var body = $("rows"); body.textContent = "";
+    var list = $("showOrphans").checked ? sessions : paired;
+    if (!list.length) { body.appendChild(document.createElement("tr")).appendChild(cell("Nenhuma linha.", "muted")); }
+    list.forEach(function (s) {
+      var tr = document.createElement("tr");
+      tr.appendChild(cell(s.phone ? String(s.phone) : "–"));
+      tr.appendChild(cell(short(s.id), "mono"));
+      tr.appendChild(cell(s.ws_open ? pill("conectada", "ok") : pill(s.paired ? "desconectada" : "sem pareamento", s.paired ? "bad" : "warn")));
+      tr.appendChild(cell(s.sync_keys ? pill("sim", "ok") : pill("não", "warn")));
+      tr.appendChild(cell(String(s.labels)));
+      var state;
+      if (!s.paired) state = pill("órfã", "warn");
+      else if (s.labels_blocked) state = pill("bloqueada (403)", "bad");
+      else if (s.ws_open && s.sync_keys && s.labels > 0) state = pill("pronta", "ok");
+      else state = pill("não pronta", "warn");
+      tr.appendChild(cell(state));
+
+      var a = document.createElement("td"); a.className = "actions";
+      if (s.paired) {
+        a.appendChild(btn("Ver etiquetas", "", function () { run("Etiquetas de " + short(s.id), "GET", "/sessions/" + s.id + "/labels"); }));
+        a.appendChild(btn("Reler etiquetas", "", function () {
+          run("Releitura de " + short(s.id), "POST", "/sessions/" + s.id + "/labels/resync").then(refresh, function () {});
+        }));
+        a.appendChild(btn("Reiniciar conexão", "", function () {
+          run("Reinício de " + short(s.id), "POST", "/sessions/" + s.id + "/restart").then(function () { setTimeout(refresh, 4000); }, function () {});
+        }));
+        a.appendChild(btn("Recuperar estado", "danger", function () {
+          confirmDialog("Recuperar estado das etiquetas",
+            "Use só em linha bloqueada (403). O celular vai DESCONECTAR TODOS os dispositivos deste número, inclusive a conexão principal: o atendimento para até você ler o QR de novo. Depois, RECONECTE a conexão principal sem apagá-la e recrie só a linha de etiquetas.",
+            "desvincular").then(function (yes) {
+              if (!yes) return;
+              run("Recuperação de " + short(s.id), "POST", "/sessions/" + s.id + "/labels/recover", { confirm: "desvincular" })
+                .then(function () { setTimeout(refresh, 5000); }, function () {});
+            });
+        }));
+      } else {
+        a.appendChild(btn("Apagar sessão órfã", "danger", function () {
+          confirmDialog("Apagar sessão sem pareamento",
+            "A sessão " + short(s.id) + " não está ligada a nenhum celular. Apagar não afeta nenhuma linha em uso. Não pode ser desfeito.", "")
+            .then(function (yes) {
+              if (!yes) return;
+              run("Exclusão de " + short(s.id), "DELETE", "/sessions/" + s.id).then(refresh, function () {});
+            });
+        }));
+      }
+      tr.appendChild(a);
+      body.appendChild(tr);
+    });
+    var ready = paired.filter(function (s) { return s.ws_open; });
+    fillSelect($("tSession"), ready);
+    fillSelect($("cSession"), ready);
+  }
+
+  function refresh() {
+    fetch("/version").then(function (r) { return r.json(); }).then(function (v) {
+      $("sVersion").textContent = String(v.build || "").replace(/^.*-(v\d+)$/, "$1") || "?";
+    }).catch(function () { $("sVersion").textContent = "fora do ar"; });
+    return api("GET", "/sessions-health").then(function (r) {
+      if (!r.ok) { log("Situação das linhas — HTTP " + r.status, r.data); return; }
+      render(r.data);
+    }).catch(function () {});
+  }
+
+  $("btnConnect").onclick = function () {
+    key = $("key").value.trim();
+    try { sessionStorage.setItem("wa_key", key); } catch (e) {}
+    refresh();
+  };
+  $("btnForget").onclick = function () {
+    key = ""; $("key").value = "";
+    try { sessionStorage.removeItem("wa_key"); } catch (e) {}
+    $("rows").textContent = "";
+    log("Chave esquecida", "A chave foi removida desta aba.");
+  };
+  $("btnRefresh").onclick = refresh;
+  $("showOrphans").onchange = refresh;
+  $("auto").onchange = function () {
+    if (timer) { clearInterval(timer); timer = null; }
+    if ($("auto").checked) timer = setInterval(refresh, 30000);
+  };
+  $("btnHeal").onclick = function () { run("Auto-cura", "POST", "/self-heal/run").then(refresh, function () {}); };
+
+  function loadLabels(sessionId) {
+    return api("GET", "/sessions/" + sessionId + "/labels").then(function (r) {
+      var list = (r.data && r.data.labels) || [];
+      list.sort(function (a, b) { return Number(a.id) - Number(b.id); });
+      return list;
+    });
+  }
+  $("btnLoadLabels").onclick = function () {
+    var id = $("tSession").value; if (!id) return;
+    loadLabels(id).then(function (list) {
+      var sel = $("tLabel"); sel.textContent = "";
+      list.forEach(function (l) {
+        var o = document.createElement("option"); o.value = l.id; o.textContent = l.id + " — " + l.name; sel.appendChild(o);
+      });
+      log("Etiquetas de " + short(id), list.map(function (l) { return l.id + " — " + l.name; }).join("\n") || "nenhuma");
+    }).catch(function () {});
+  };
+  function chatOp(kind) {
+    var id = $("tSession").value, phone = $("tPhone").value.replace(/\D/g, ""), label = $("tLabel").value;
+    if (!id || !phone || !label) { log("Faltam dados", "Escolha a linha, informe o número e carregue/escolha a etiqueta."); return; }
+    run((kind === "apply" ? "Aplicar" : "Remover") + " etiqueta " + label + " em " + phone, "POST",
+      "/sessions/" + id + "/labels/" + kind, { chat_id: phone, label_id: label }).catch(function () {});
+  }
+  $("btnApply").onclick = function () { chatOp("apply"); };
+  $("btnRemove").onclick = function () { chatOp("remove"); };
+  $("btnChat").onclick = function () {
+    var id = $("tSession").value, phone = $("tPhone").value.replace(/\D/g, "");
+    if (!id || !phone) { log("Faltam dados", "Escolha a linha e informe o número."); return; }
+    run("Etiquetas da conversa " + phone, "GET", "/sessions/" + id + "/labels/chats/" + phone).catch(function () {});
+  };
+  $("btnCreate").onclick = function () {
+    var id = $("cSession").value, name = $("cName").value.trim();
+    if (!id || !name) return;
+    loadLabels(id).then(function (list) {
+      var same = list.filter(function (l) { return String(l.name).trim().toLowerCase() === name.toLowerCase(); });
+      if (same.length) { log("Etiqueta já existe", name + " já existe nessa linha (número " + same[0].id + ")."); return; }
+      var next = list.reduce(function (m, l) { var n = Number(l.id); return n > m ? n : m; }, 0) + 1;
+      return run("Criar etiqueta " + name + " (número " + next + ")", "POST", "/sessions/" + id + "/labels",
+        { label_id: String(next), name: name, color: 3 });
+    }).catch(function () {});
+  };
+
+  if (key) refresh();
+})();
+</script>
+</body>
+</html>

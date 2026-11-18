@@ -1,7 +1,13 @@
 # wa-connector
 
 Servidor próprio de conexão WhatsApp (Baileys) usado pelo Backster como "Meu Servidor".
-Build: `2026-11-18-labels-mode-self-heal-v7`.
+Build: `2026-11-18-labels-mode-self-heal-v8`.
+
+## Painel de operação
+
+Abra `https://SEU-HOST/painel` no navegador e cole a `CONNECTOR_API_KEY`. A chave fica só na aba (some ao fechar) e cada botão chama a API do próprio conector. A página em si não tem dados nem segredos; sem a chave nada responde.
+
+Para alterar o painel: edite `scripts/painel.html` e rode `bash scripts/gerar-painel.sh` na raiz do repositório.
 
 ## O que mudou nesta versão
 
@@ -19,7 +25,8 @@ Build: `2026-11-18-labels-mode-self-heal-v7`.
 | Log de falha de decriptação não dizia qual aparelho enviou | A linha `[decrypt:...]` mostra `remetente usuário.aparelho`; `.0` é o celular principal (v2) |
 | Linha recém-pareada no modo `labels` ficava sem etiquetas | O filtro só liga depois que a linha recebe as chaves de sincronização; o log avisa quando elas chegam e `sessions-health` mostra `sync_keys` (v3) |
 | WhatsApp recusa (403) o estado de etiquetas de uma linha e nada grava nela | O conector relê o estado do zero e tenta de novo (1x a cada 30 min); se não resolver, responde `423 labels_blocked_repair_needed` e marca `labels_blocked: true` no `sessions-health` (v4) |
-| Releitura com 403 mesmo em linha recém-pareada (arquivo de estado vencido no servidor do WhatsApp) | Recuperação manual: `POST /sessions/:id/labels/recover` com `{"confirm":"desvincular"}`. O celular desvincula a linha e gera um estado novo; depois é preciso recriar a linha de etiquetas e ler o QR. Nunca é disparado sozinho. Funcionou no 3934 em 18/11 (v7) |
+| Releitura com 403 mesmo em linha recém-pareada (arquivo de estado vencido no servidor do WhatsApp) | Recuperação manual: botão "Recuperar estado" no painel, ou `POST /sessions/:id/labels/recover` com `{"confirm":"desvincular"}`. **O celular desconecta TODOS os dispositivos do número, inclusive a conexão principal** (o atendimento para até ler o QR de novo) e gera um estado novo. Depois: reconectar a principal SEM apagar a conexão no CRM (apagar remove as conversas) e recriar só a linha de etiquetas. Nunca é disparado sozinho. Destravou o 3934 e o 7930 em 18/11 |
+| Operação exigia terminal e curl | Painel em `GET /painel`: situação das linhas, reler etiquetas, reiniciar conexão, recuperar estado, apagar órfãs, testar e criar etiqueta (v8) |
 | Várias etiquetas ao mesmo tempo no mesmo número | Fila por número, uma por vez, com pausa de 700 ms e limite de 20 s por operação |
 
 ## Modos de sessão
@@ -73,7 +80,7 @@ Respostas de etiqueta (`/labels`, `/labels/apply`, `/labels/remove`, `/labels/re
 
 ## Depois de subir esta versão
 
-1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v7`.
+1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v8`.
 2. Apagar as 17 sessões órfãs: `CONNECTOR_URL=... CONNECTOR_API_KEY=... bash scripts/apagar-orfas.sh`. Sem rodar o script, elas ficam paradas e são apagadas sozinhas em 24 h.
 3. Parear de novo a linha de etiquetas do 7930 (`org_50b07d5e_mtu93c6k`): as chaves dela se perderam ("Invalid PreKey ID").
 4. Conferir `GET /sessions-health`: as 9 linhas devem aparecer com `ws_open: true` e `labels` maior que zero. A do 8118 (`org_50b07d5e_muwyxkng`) deve ser relida sozinha na primeira auto-cura; se continuar em zero, chamar `POST /sessions/org_50b07d5e_muwyxkng/labels/resync`.

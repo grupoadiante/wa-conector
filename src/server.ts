@@ -1,3 +1,4 @@
+import { PANEL_HTML } from "./panelHtml";
 import express from "express";
 import { config } from "./config";
 import { requireApiKey } from "./authMiddleware";
@@ -21,7 +22,7 @@ setLiveCounter(countLiveSessions);
 installResourceLog();
 
 // Identificador de build — aparece no log de subida e em GET /version.
-const BUILD_VERSION = "2026-11-18-labels-mode-self-heal-v7";
+const BUILD_VERSION = "2026-11-18-labels-mode-self-heal-v8";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -41,6 +42,22 @@ app.get("/version", (_req, res) =>
     rssMB: Math.round(process.memoryUsage().rss / 1048576),
   })
 );
+
+// Painel de operação (HTML estático, sem dados). Público como /health e
+// /version: a página não contém nenhum segredo — cada botão chama a API com a
+// chave que o operador digita, e sem a chave nada responde.
+app.get(["/painel", "/painel/"], (_req, res) => {
+  res.set({
+    "Content-Type": "text/html; charset=utf-8",
+    "Cache-Control": "no-store",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "Content-Security-Policy":
+      "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+  });
+  res.send(PANEL_HTML);
+});
 
 app.use(requireApiKey);
 app.use(sessionsRouter);
