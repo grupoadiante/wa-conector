@@ -63,6 +63,8 @@ sessionsRouter.get("/sessions-health", async (_req, res) => {
       total: sessions.length,
       connected: sessions.filter((s) => s.ws_open).length,
       not_paired: sessions.filter((s) => !s.paired).map((s) => s.id),
+      // linhas que não gravam etiqueta até serem pareadas de novo
+      labels_blocked: sessions.filter((s) => s.labels_blocked).map((s) => s.id),
       last_self_heal: getLastSelfHealReport(),
       sessions,
     });

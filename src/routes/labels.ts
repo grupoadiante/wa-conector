@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { resyncLabels } from "../baileys/session";
-import { applyLabel, removeLabel, upsertLabelDefinition, httpStatusFor } from "../baileys/labels";
+import { applyLabel, removeLabel, upsertLabelDefinition, httpStatusFor, httpStatusForError, clearLabelBlock } from "../baileys/labels";
 import { listLabelsFromStore, listChatLabels } from "../baileys/labelStore";
 import { toJid } from "../jid";
 
@@ -14,7 +14,7 @@ labelsRouter.get("/sessions/:id/labels", async (req, res) => {
     const labels = await listLabelsFromStore(id);
     res.json({ labels });
   } catch (err) {
-    res.status(502).json({ error: (err as Error).message });
+    res.status(422).json({ error: (err as Error).message });
   }
 });
 
@@ -23,11 +23,16 @@ labelsRouter.get("/sessions/:id/labels", async (req, res) => {
 labelsRouter.post("/sessions/:id/labels/resync", async (req, res) => {
   const { id } = req.params;
   try {
-    const result = await resyncLabels(id);
+    const result = await Promise.race([
+      resyncLabels(id),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("label_timeout")), 45_000)),
+    ]);
+    clearLabelBlock(id);
     res.json({ ok: true, ...result });
   } catch (err) {
-    const message = (err as Error).message;
-    res.status(message === "session_not_connected" ? 503 : 502).json({ ok: false, error: message });
+    const message = (err as Error).message || "resync_failed";
+    console.warn(`[labels:${id}] releitura manual falhou: ${message}`);
+    res.status(httpStatusForError(message)).json({ ok: false, error: message });
   }
 });
 
@@ -73,6 +78,6 @@ labelsRouter.get("/sessions/:id/labels/chats/:chatId", async (req, res) => {
     const labelIds = await listChatLabels(id, toJid(chatId));
     res.json({ chat_id: toJid(chatId), label_ids: labelIds });
   } catch (err) {
-    res.status(502).json({ error: (err as Error).message });
+    res.status(422).json({ error: (err as Error).message });
   }
 });

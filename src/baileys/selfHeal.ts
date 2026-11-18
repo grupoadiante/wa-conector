@@ -18,6 +18,7 @@
 // rodada e uma pausa entre uma ação e outra, para a cura nunca virar a
 // própria causa de instabilidade.
 
+import { getLabelBlock } from "./labels";
 import { config } from "../config";
 import { redis } from "../redis";
 import { SessionRecord } from "../types";
@@ -54,6 +55,9 @@ export interface SessionHealth {
   labels: number;
   // true quando a linha tem as chaves de sincronização (sem elas não etiqueta)
   sync_keys: boolean;
+  // true quando o WhatsApp recusa (403) o estado de etiquetas: nada grava
+  // nessa linha até ela ser pareada de novo.
+  labels_blocked: boolean;
   reconnect_attempts: number;
   pending_reconnect: boolean;
   updated_at: string | null;
@@ -71,6 +75,7 @@ export async function describeSession(id: string, rec?: SessionRecord | null): P
     ws_open: !!info?.wsOpen,
     labels: await countLabelsInStore(id).catch(() => 0),
     sync_keys: !!getLiveSocket(id)?.authState?.creds?.myAppStateKeyId,
+    labels_blocked: !!getLabelBlock(id),
     reconnect_attempts: getReconnectAttempts(id),
     pending_reconnect: hasPendingReconnect(id),
     updated_at: record?.updatedAt ?? null,

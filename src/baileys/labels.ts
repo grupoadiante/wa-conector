@@ -1,4 +1,4 @@
-import { getLiveSocket, isSessionHealthy, restartSession } from "./session";
+import { getLiveSocket, isSessionHealthy, restartSession, resyncLabels } from "./session";
 import { config } from "../config";
 
 export interface LabelOpResult {
@@ -55,6 +55,34 @@ function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 // Executa a operação com limite de tempo e confere a saúde da sessão em
 // seguida. Se a sessão caiu por causa da operação, ela é reiniciada aqui
 // mesmo, sem depender de ninguém notar.
+// Linhas em que o WhatsApp recusa entregar o estado das etiquetas (erro 403
+// ao baixar o arquivo de sincronização). Enquanto isso durar, NENHUMA
+// etiqueta é gravada nessa linha. Guardamos para avisar no /sessions-health
+// e para não martelar a releitura a cada venda.
+interface LabelBlock {
+  since: number;
+  failures: number;
+  lastRecoveryAt: number;
+}
+const blocked = new Map<string, LabelBlock>();
+const RECOVERY_COOLDOWN_MS = 30 * 60 * 1000;
+export const LABELS_BLOCKED_ERROR =
+  "labels_blocked_repair_needed: o WhatsApp recusou (403) o estado de etiquetas desta linha. Remova a linha de etiquetas, crie de novo e leia o QR.";
+
+export function getLabelBlock(sessionId: string): LabelBlock | null {
+  return blocked.get(sessionId) ?? null;
+}
+export function clearLabelBlock(sessionId: string): void {
+  blocked.delete(sessionId);
+}
+export function listLabelBlocks(): string[] {
+  return [...blocked.keys()];
+}
+
+function isAppState403(message: string): boolean {
+  return /status code 403/i.test(message);
+}
+
 async function withLabelSafety(sessionId: string, op: () => Promise<void>): Promise<LabelOpResult> {
   return enqueue(sessionId, async () => {
     const sock = getLiveSocket(sessionId);
@@ -63,11 +91,38 @@ async function withLabelSafety(sessionId: string, op: () => Promise<void>): Prom
     try {
       await withTimeout(op(), config.labelOpTimeoutMs);
     } catch (err) {
-      const message = (err as Error)?.message || "label_op_failed";
-      console.warn(`[labels:${sessionId}] operação de etiqueta falhou: ${message}`);
+      let message = (err as Error)?.message || "label_op_failed";
+
+      if (isAppState403(message)) {
+        const block = blocked.get(sessionId) ?? { since: Date.now(), failures: 0, lastRecoveryAt: 0 };
+        block.failures += 1;
+        blocked.set(sessionId, block);
+
+        // Auto-recuperação: relê o estado do zero e tenta a operação mais uma
+        // vez. No máximo uma tentativa a cada 30 min por linha.
+        if (Date.now() - block.lastRecoveryAt > RECOVERY_COOLDOWN_MS) {
+          block.lastRecoveryAt = Date.now();
+          console.warn(`[labels:${sessionId}] estado de etiquetas recusado (403) — relendo do zero e tentando de novo`);
+          try {
+            await withTimeout(resyncLabels(sessionId), 30_000);
+            await withTimeout(op(), config.labelOpTimeoutMs);
+            blocked.delete(sessionId);
+            console.log(`[labels:${sessionId}] recuperado após releitura`);
+            return { ok: true };
+          } catch (retryErr) {
+            console.warn(
+              `[labels:${sessionId}] releitura não resolveu (${(retryErr as Error)?.message}) — linha precisa ser pareada de novo`
+            );
+          }
+        }
+        message = LABELS_BLOCKED_ERROR;
+      } else {
+        console.warn(`[labels:${sessionId}] operação de etiqueta falhou: ${message}`);
+      }
       return { ok: false, error: message };
     }
 
+    blocked.delete(sessionId);
     await new Promise((r) => setTimeout(r, 400));
     if (!(await isSessionHealthy(sessionId))) {
       console.warn(`[labels:${sessionId}] sessão caiu após operação de etiqueta — reiniciando`);
@@ -80,13 +135,18 @@ async function withLabelSafety(sessionId: string, op: () => Promise<void>): Prom
   });
 }
 
-// Código HTTP para cada resultado. Tudo que é passageiro fica em 5xx (o CRM
-// tenta de novo); o corpo sempre diz o motivo.
+// Código HTTP para cada resultado. NÃO usamos 502/503/504: o proxy do
+// EasyPanel troca essas respostas por uma página HTML dele e o motivo real
+// some. Com 4xx o corpo JSON chega inteiro a quem chamou.
 export function httpStatusFor(result: LabelOpResult): number {
   if (result.ok) return 200;
-  if (result.error === "session_not_connected") return 503;
-  if (result.error === "label_timeout") return 504;
-  return 502;
+  return httpStatusForError(result.error ?? "");
+}
+export function httpStatusForError(error: string): number {
+  if (error === "session_not_connected") return 409;
+  if (error === "label_timeout") return 408;
+  if (error.startsWith("labels_blocked_repair_needed")) return 423;
+  return 422;
 }
 
 export async function applyLabel(sessionId: string, chatId: string, labelId: string): Promise<LabelOpResult> {

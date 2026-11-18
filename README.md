@@ -1,7 +1,7 @@
 # wa-connector
 
 Servidor próprio de conexão WhatsApp (Baileys) usado pelo Backster como "Meu Servidor".
-Build: `2026-11-18-labels-mode-self-heal-v3`.
+Build: `2026-11-18-labels-mode-self-heal-v4`.
 
 ## O que mudou nesta versão
 
@@ -18,6 +18,7 @@ Build: `2026-11-18-labels-mode-self-heal-v3`.
 | Quarentena de 30 min rejeitava a tentativa do próprio celular de refazer a comunicação com o conector | A própria conta de cada sessão nunca entra em quarentena (v2) |
 | Log de falha de decriptação não dizia qual aparelho enviou | A linha `[decrypt:...]` mostra `remetente usuário.aparelho`; `.0` é o celular principal (v2) |
 | Linha recém-pareada no modo `labels` ficava sem etiquetas | O filtro só liga depois que a linha recebe as chaves de sincronização; o log avisa quando elas chegam e `sessions-health` mostra `sync_keys` (v3) |
+| WhatsApp recusa (403) o estado de etiquetas de uma linha e nada grava nela | O conector relê o estado do zero e tenta de novo (1x a cada 30 min); se não resolver, responde `423 labels_blocked_repair_needed` e marca `labels_blocked: true` no `sessions-health` — a linha precisa ser pareada de novo (v4) |
 | Várias etiquetas ao mesmo tempo no mesmo número | Fila por número, uma por vez, com pausa de 700 ms e limite de 20 s por operação |
 
 ## Modos de sessão
@@ -67,11 +68,11 @@ As rotas antigas continuam iguais. Novas:
 - `POST /self-heal/run` — roda a auto-cura agora.
 - `POST /sessions/:id/labels/resync` — relê as etiquetas do WhatsApp.
 
-Respostas de etiqueta (`/labels`, `/labels/apply`, `/labels/remove`): `200` ok, `503` sessão não conectada, `504` tempo esgotado, `502` outro erro. O corpo sempre traz `{"ok":false,"error":"..."}` com o motivo.
+Respostas de etiqueta (`/labels`, `/labels/apply`, `/labels/remove`, `/labels/resync`): `200` ok, `409` sessão não conectada, `408` tempo esgotado, `423` linha bloqueada (precisa parear de novo), `422` outro erro. O corpo sempre traz `{"ok":false,"error":"..."}` com o motivo. Não usamos 502/503/504 porque o proxy do EasyPanel troca essas respostas por uma página HTML e esconde o motivo (v4).
 
 ## Depois de subir esta versão
 
-1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v3`.
+1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v4`.
 2. Apagar as 17 sessões órfãs: `CONNECTOR_URL=... CONNECTOR_API_KEY=... bash scripts/apagar-orfas.sh`. Sem rodar o script, elas ficam paradas e são apagadas sozinhas em 24 h.
 3. Parear de novo a linha de etiquetas do 7930 (`org_50b07d5e_mtu93c6k`): as chaves dela se perderam ("Invalid PreKey ID").
 4. Conferir `GET /sessions-health`: as 9 linhas devem aparecer com `ws_open: true` e `labels` maior que zero. A do 8118 (`org_50b07d5e_muwyxkng`) deve ser relida sozinha na primeira auto-cura; se continuar em zero, chamar `POST /sessions/org_50b07d5e_muwyxkng/labels/resync`.
