@@ -1,4 +1,4 @@
-import { getLiveSocket, isSessionHealthy, restartSession, resyncLabels } from "./session";
+import { getLiveSocket, isSessionHealthy, restartSession, resyncLabels, requestLabelStateRecovery } from "./session";
 import { config } from "../config";
 
 export interface LabelOpResult {
@@ -67,7 +67,7 @@ interface LabelBlock {
 const blocked = new Map<string, LabelBlock>();
 const RECOVERY_COOLDOWN_MS = 30 * 60 * 1000;
 export const LABELS_BLOCKED_ERROR =
-  "labels_blocked_repair_needed: o WhatsApp recusou (403) o estado de etiquetas desta linha. Remova a linha de etiquetas, crie de novo e leia o QR.";
+  "labels_blocked_repair_needed: o WhatsApp recusou (403) o estado de etiquetas desta linha. O conector pediu ao celular um estado novo; se continuar, desconecte TODOS os dispositivos no aparelho e pareie de novo.";
 
 export function getLabelBlock(sessionId: string): LabelBlock | null {
   return blocked.get(sessionId) ?? null;
@@ -111,7 +111,10 @@ async function withLabelSafety(sessionId: string, op: () => Promise<void>): Prom
             return { ok: true };
           } catch (retryErr) {
             console.warn(
-              `[labels:${sessionId}] releitura não resolveu (${(retryErr as Error)?.message}) — linha precisa ser pareada de novo`
+              `[labels:${sessionId}] releitura não resolveu (${(retryErr as Error)?.message}) — pedindo ao celular um estado novo`
+            );
+            requestLabelStateRecovery(sessionId).catch((e) =>
+              console.warn(`[labels:${sessionId}] pedido de recuperação falhou: ${(e as Error).message}`)
             );
           }
         }

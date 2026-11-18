@@ -1,7 +1,7 @@
 # wa-connector
 
 Servidor próprio de conexão WhatsApp (Baileys) usado pelo Backster como "Meu Servidor".
-Build: `2026-11-18-labels-mode-self-heal-v4`.
+Build: `2026-11-18-labels-mode-self-heal-v5`.
 
 ## O que mudou nesta versão
 
@@ -19,6 +19,7 @@ Build: `2026-11-18-labels-mode-self-heal-v4`.
 | Log de falha de decriptação não dizia qual aparelho enviou | A linha `[decrypt:...]` mostra `remetente usuário.aparelho`; `.0` é o celular principal (v2) |
 | Linha recém-pareada no modo `labels` ficava sem etiquetas | O filtro só liga depois que a linha recebe as chaves de sincronização; o log avisa quando elas chegam e `sessions-health` mostra `sync_keys` (v3) |
 | WhatsApp recusa (403) o estado de etiquetas de uma linha e nada grava nela | O conector relê o estado do zero e tenta de novo (1x a cada 30 min); se não resolver, responde `423 labels_blocked_repair_needed` e marca `labels_blocked: true` no `sessions-health` — a linha precisa ser pareada de novo (v4) |
+| Releitura com 403 mesmo em linha recém-pareada (arquivo de estado vencido no servidor do WhatsApp) | O conector pede ao celular que gere um estado novo (`POST /sessions/:id/labels/recover`, e automaticamente quando a releitura dá 403). Experimental: depende do aparelho responder (v5) |
 | Várias etiquetas ao mesmo tempo no mesmo número | Fila por número, uma por vez, com pausa de 700 ms e limite de 20 s por operação |
 
 ## Modos de sessão
@@ -72,7 +73,7 @@ Respostas de etiqueta (`/labels`, `/labels/apply`, `/labels/remove`, `/labels/re
 
 ## Depois de subir esta versão
 
-1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v4`.
+1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v5`.
 2. Apagar as 17 sessões órfãs: `CONNECTOR_URL=... CONNECTOR_API_KEY=... bash scripts/apagar-orfas.sh`. Sem rodar o script, elas ficam paradas e são apagadas sozinhas em 24 h.
 3. Parear de novo a linha de etiquetas do 7930 (`org_50b07d5e_mtu93c6k`): as chaves dela se perderam ("Invalid PreKey ID").
 4. Conferir `GET /sessions-health`: as 9 linhas devem aparecer com `ws_open: true` e `labels` maior que zero. A do 8118 (`org_50b07d5e_muwyxkng`) deve ser relida sozinha na primeira auto-cura; se continuar em zero, chamar `POST /sessions/org_50b07d5e_muwyxkng/labels/resync`.

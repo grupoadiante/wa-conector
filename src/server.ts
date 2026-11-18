@@ -21,7 +21,7 @@ setLiveCounter(countLiveSessions);
 installResourceLog();
 
 // Identificador de build — aparece no log de subida e em GET /version.
-const BUILD_VERSION = "2026-11-18-labels-mode-self-heal-v4";
+const BUILD_VERSION = "2026-11-18-labels-mode-self-heal-v5";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));

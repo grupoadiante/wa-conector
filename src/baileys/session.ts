@@ -4,6 +4,8 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   makeCacheableSignalKeyStore,
   WAMessageStubType,
+  jidNormalizedUser,
+  proto,
 } from "@whiskeysockets/baileys";
 import { Boom } from "@hapi/boom";
 import { useRedisAuthState, clearRedisAuthState, purgeJidSession } from "./authState";
@@ -551,6 +553,39 @@ export async function resyncLabels(id: string): Promise<{ before: number; after:
   }
   console.log(`[labels:${id}] etiquetas relidas do WhatsApp (antes=${before}, depois=${after})`);
   return { before, after };
+}
+
+// Pede ao CELULAR que regenere o estado sincronizado (etiquetas etc.).
+// Usado quando o WhatsApp devolve 403 no arquivo de estado: o link guardado
+// no servidor venceu e só o aparelho principal consegue enviar um novo.
+// É o mesmo aviso que o WhatsApp Web manda nesse caso
+// (APP_STATE_FATAL_EXCEPTION_NOTIFICATION). Não há garantia de resposta:
+// depende do aparelho estar online e da versão do app.
+const lastRecoveryRequest = new Map<string, number>();
+export function getLastRecoveryRequest(id: string): number {
+  return lastRecoveryRequest.get(id) ?? 0;
+}
+export async function requestLabelStateRecovery(id: string): Promise<void> {
+  const managed = live.get(id);
+  if (!managed || !managed.sock.ws.isOpen) throw new Error("session_not_connected");
+  const me = managed.sock.user?.id;
+  if (!me) throw new Error("session_not_connected");
+  const meJid = jidNormalizedUser(me);
+  await managed.sock.relayMessage(
+    meJid,
+    {
+      protocolMessage: {
+        type: proto.Message.ProtocolMessage.Type.APP_STATE_FATAL_EXCEPTION_NOTIFICATION,
+        appStateFatalExceptionNotification: {
+          collectionNames: ["regular", "regular_high", "regular_low", "critical_block", "critical_unblock_low"],
+          timestamp: Date.now(),
+        },
+      },
+    } as any,
+    { additionalAttributes: { category: "peer", push_priority: "high_force" } } as any
+  );
+  lastRecoveryRequest.set(id, Date.now());
+  console.log(`[labels:${id}] pedido de recuperação do estado enviado ao celular`);
 }
 
 export function getLastLabelResync(id: string): number {
