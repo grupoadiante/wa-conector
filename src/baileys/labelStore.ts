@@ -43,3 +43,17 @@ export async function setChatLabelAssociation(
 export async function listChatLabels(sessionId: string, chatId: string): Promise<string[]> {
   return redis.smembers(assocKey(sessionId, chatId));
 }
+
+export async function countLabelsInStore(sessionId: string): Promise<number> {
+  return redis.hlen(key(sessionId));
+}
+
+// Apaga o cache de etiquetas e as associações de uma sessão removida.
+export async function clearLabelStore(sessionId: string): Promise<void> {
+  await redis.del(key(sessionId));
+  const stream = redis.scanStream({ match: `wa:label-assoc:${sessionId}:*`, count: 200 });
+  for await (const keys of stream) {
+    const list = keys as string[];
+    if (list.length) await redis.del(...list);
+  }
+}

@@ -103,6 +103,20 @@ export async function purgeJidSession(sessionId: string, jid: string): Promise<n
   return count;
 }
 
+// Diz se a sessão já foi pareada alguma vez (existe "me" nas credenciais),
+// sem montar o estado inteiro. Usado pela auto-cura para separar sessão
+// pareada (deve ficar de pé) de sessão órfã (nunca leu o QR).
+export async function isSessionPaired(sessionId: string): Promise<boolean> {
+  try {
+    const raw = await redis.get(`wa:${sessionId}:creds`);
+    if (!raw) return false;
+    const creds = JSON.parse(raw, BufferJSON.reviver) as AuthenticationCreds;
+    return !!creds?.me?.id;
+  } catch {
+    return false;
+  }
+}
+
 // Apaga toda a sessão do Redis — usado em logout real ou ao remover a conexão.
 export async function clearRedisAuthState(sessionId: string): Promise<void> {
   const stream = redis.scanStream({ match: `wa:${sessionId}:*` });

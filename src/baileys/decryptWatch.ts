@@ -14,18 +14,22 @@ interface ILogger {
 
 const base = P({ level: "error" });
 
-// Quantas falhas seguidas de decriptação/mensagem vazia pro MESMO contato,
-// dentro dessa janela, disparam a renegociação automática (assertSessions
-// com force).
+// ---------------------------------------------------------------------------
+// Renegociação automática por contato (SÓ no modo "full")
+// ---------------------------------------------------------------------------
+// Regras, depois do incidente de 18/11:
+//  - Só conta falha de mensagem RECEBIDA de um lead. Falha em mensagem
+//    "fromMe" (cópia do que o próprio número enviou por outro aparelho) não
+//    tem nada a ver com o lead: quem falhou foi o outro aparelho da conta, e
+//    renegociar com o lead só gera consulta inútil no WhatsApp.
+//  - Existe um teto de renegociações por sessão por minuto. Sem teto, uma
+//    instabilidade vira centenas de buscas de chave em poucos segundos.
+//  - Nunca bloqueia contato. Bloquear lead por erro de criptografia fazia o
+//    lead não conseguir mais mandar mensagem (nem o comprovante).
 const FAILURE_THRESHOLD = 3;
 const WINDOW_MS = 2 * 60 * 1000;
-
-// Tempo mínimo entre uma renegociação e a próxima PRO MESMO contato — sem
-// isso, se a renegociação falhar (ex: "Timed Out", como vimos hoje), as
-// próximas 3 falhas chegam quase na hora (o problema não foi resolvido) e
-// dispara nova tentativa imediatamente, virando um loop sem fim que nunca
-// dá tempo do WhatsApp responder.
-const COOLDOWN_MS = 60 * 1000;
+const COOLDOWN_MS = 10 * 60 * 1000;
+const MAX_RENEGOTIATIONS_PER_MINUTE = 4;
 
 interface FailureState {
   count: number;
@@ -36,21 +40,22 @@ export interface FailureTracker {
   noteFailure(jid: string | undefined | null, reason: string): void;
 }
 
-// Guardado no módulo (fora da closure de createFailureTracker) e indexado
-// por sessão+contato — de propósito. Se guardasse dentro da closure, uma
-// reconexão da sessão (que cria um tracker novo do zero) apagaria a
-// memória do cooldown e o limite de 60s deixaria de valer bem na hora que
-// mais importa: durante uma instabilidade, quando a sessão reconecta
-// repetidas vezes.
+// Fora da closure, de propósito: uma reconexão cria um tracker novo e não
+// pode apagar a memória do cooldown.
 const globalLastTrigger = new Map<string, number>();
+const renegotiationsBySession = new Map<string, number[]>();
 
-// Cobre dois casos bem diferentes, que precisam contar pro mesmo limite:
-// 1) Falha de decriptação Signal de verdade (erro no log do Baileys,
-//    "failed to decrypt message" — Bad MAC, No session record, etc).
-// 2) Mensagem "stub" vazia (messageStubType 2 / CIPHERTEXT — o WhatsApp
-//    entrega um envelope sem conteúdo, "Message absent from node"). Esse
-//    caso NUNCA gera um erro de log — precisa ser detectado direto no
-//    messages.upsert (ver session.ts), não dá pra pegar só ouvindo o logger.
+function budgetAvailable(sessionId: string, now: number): boolean {
+  const hits = (renegotiationsBySession.get(sessionId) ?? []).filter((t) => now - t < 60_000);
+  if (hits.length >= MAX_RENEGOTIATIONS_PER_MINUTE) {
+    renegotiationsBySession.set(sessionId, hits);
+    return false;
+  }
+  hits.push(now);
+  renegotiationsBySession.set(sessionId, hits);
+  return true;
+}
+
 export function createFailureTracker(
   sessionId: string,
   onRepeatedFailure: (jid: string) => void
@@ -64,7 +69,7 @@ export function createFailureTracker(
       const now = Date.now();
       const cooldownKey = `${sessionId}:${jid}`;
       const last = globalLastTrigger.get(cooldownKey);
-      if (last && now - last < COOLDOWN_MS) return; // em cooldown, ignora
+      if (last && now - last < COOLDOWN_MS) return;
 
       const state = failures.get(jid);
       if (!state || now - state.windowStart > WINDOW_MS) {
@@ -72,51 +77,51 @@ export function createFailureTracker(
         return;
       }
       state.count += 1;
-      if (state.count >= FAILURE_THRESHOLD) {
-        failures.delete(jid);
-        globalLastTrigger.set(cooldownKey, now);
-        console.warn(
-          `[decrypt-watch:${sessionId}] ${FAILURE_THRESHOLD} falhas (${reason}) seguidas com ${jid} — renegociando sessão automaticamente`
-        );
-        onRepeatedFailure(jid);
-      }
+      if (state.count < FAILURE_THRESHOLD) return;
+
+      failures.delete(jid);
+      globalLastTrigger.set(cooldownKey, now);
+      if (!budgetAvailable(sessionId, now)) return; // teto por minuto atingido
+      console.warn(
+        `[decrypt-watch:${sessionId}] ${FAILURE_THRESHOLD} falhas (${reason}) seguidas com ${jid} — renegociando sessão desse contato`
+      );
+      onRepeatedFailure(jid);
     },
   };
 }
 
-export function createDecryptWatchLogger(sessionId: string, tracker: FailureTracker): ILogger {
-  function wrap(pinoLogger: any): ILogger {
-    return {
-      get level() {
-        return pinoLogger.level;
-      },
-      set level(v: string) {
-        pinoLogger.level = v;
-      },
-      child: (obj: Record<string, unknown>) => wrap(pinoLogger.child(obj)),
-      trace: (obj: unknown, msg?: string) => pinoLogger.trace(obj, msg),
-      debug: (obj: unknown, msg?: string) => pinoLogger.debug(obj, msg),
-      info: (obj: unknown, msg?: string) => pinoLogger.info(obj, msg),
-      warn: (obj: unknown, msg?: string) => pinoLogger.warn(obj, msg),
-      error: (obj: unknown, msg?: string) => {
-        if (msg === "failed to decrypt message") {
-          tracker.noteFailure((obj as any)?.key?.remoteJid, "decrypt");
-        }
-        pinoLogger.error(obj, msg);
-      },
-    } as ILogger;
-  }
-
-  return wrap(base);
+// ---------------------------------------------------------------------------
+// Contadores de falha de decriptação (viram um número na linha [stats])
+// ---------------------------------------------------------------------------
+let decryptFailures = 0;
+export function takeDecryptFailureCount(): number {
+  const n = decryptFailures;
+  decryptFailures = 0;
+  return n;
 }
 
-// "Socket zumbi": o WebSocket morreu de um jeito que o Baileys NUNCA emite
-// o evento connection.update com connection==="close" — então a reconexão
-// automática (em session.ts, no listener desse evento) nunca dispara. O
-// sintoma é "error in validating connection" (Connection Closed / WebSocket
-// Error) repetindo sem parar, às vezes por vários minutos, até alguém
-// reiniciar o container na mão. Esse watcher detecta a rajada e força um
-// restartSession() manual — sem depender do Baileys perceber a queda sozinho.
+// No máximo algumas linhas por minuto por sessão — o resto só é contado.
+const MAX_DECRYPT_LINES_PER_MINUTE = 5;
+const decryptLines = new Map<string, number[]>();
+function mayPrintDecryptLine(sessionId: string): boolean {
+  const now = Date.now();
+  const hits = (decryptLines.get(sessionId) ?? []).filter((t) => now - t < 60_000);
+  if (hits.length >= MAX_DECRYPT_LINES_PER_MINUTE) {
+    decryptLines.set(sessionId, hits);
+    return false;
+  }
+  hits.push(now);
+  decryptLines.set(sessionId, hits);
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// "Socket zumbi"
+// ---------------------------------------------------------------------------
+// O WebSocket morreu de um jeito que o Baileys NUNCA emite connection
+// "close" — então a reconexão automática não dispara. O sintoma é "error in
+// validating connection" repetindo sem parar. Esse watcher detecta a rajada
+// e força um restart da sessão.
 const ZOMBIE_THRESHOLD = 8;
 const ZOMBIE_WINDOW_MS = 20_000;
 const ZOMBIE_COOLDOWN_MS = 2 * 60 * 1000;
@@ -135,8 +140,7 @@ export function createZombieSocketWatch(
   return {
     noteConnectionError() {
       const now = Date.now();
-      const sinceLastTrigger = now - lastTrigger;
-      if (lastTrigger && sinceLastTrigger < ZOMBIE_COOLDOWN_MS) return; // já reiniciou recente, espera
+      if (lastTrigger && now - lastTrigger < ZOMBIE_COOLDOWN_MS) return;
 
       hits.push(now);
       hits = hits.filter((t) => now - t <= ZOMBIE_WINDOW_MS);
@@ -153,9 +157,11 @@ export function createZombieSocketWatch(
   };
 }
 
+// Logger passado pro Baileys. `decryptTracker` é null no modo "labels" (lá
+// as mensagens nem são decifradas, então não há o que renegociar).
 export function createConnectionWatchLogger(
   sessionId: string,
-  decryptTracker: FailureTracker,
+  decryptTracker: FailureTracker | null,
   zombieWatch: ZombieSocketWatch
 ): ILogger {
   function wrap(pinoLogger: any): ILogger {
@@ -173,7 +179,18 @@ export function createConnectionWatchLogger(
       warn: (obj: unknown, msg?: string) => pinoLogger.warn(obj, msg),
       error: (obj: unknown, msg?: string) => {
         if (msg === "failed to decrypt message") {
-          decryptTracker.noteFailure((obj as any)?.key?.remoteJid, "decrypt");
+          decryptFailures++;
+          const key = (obj as any)?.key;
+          if (decryptTracker && key?.fromMe !== true) {
+            decryptTracker.noteFailure(key?.remoteJid, "decrypt");
+          }
+          // Uma linha curta (sem stack), e só algumas por minuto.
+          if (mayPrintDecryptLine(sessionId)) {
+            console.warn(
+              `[decrypt:${sessionId}] falha ao decifrar (${(obj as any)?.err?.message ?? "?"}) — chat ${key?.remoteJid ?? "?"} fromMe=${key?.fromMe === true}`
+            );
+          }
+          return;
         }
         if (msg === "error in validating connection") {
           zombieWatch.noteConnectionError();

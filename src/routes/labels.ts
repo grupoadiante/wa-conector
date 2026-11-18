@@ -1,6 +1,6 @@
 import { Router } from "express";
-import { getLiveSocket } from "../baileys/session";
-import { applyLabel, removeLabel, upsertLabelDefinition } from "../baileys/labels";
+import { resyncLabels } from "../baileys/session";
+import { applyLabel, removeLabel, upsertLabelDefinition, httpStatusFor } from "../baileys/labels";
 import { listLabelsFromStore, listChatLabels } from "../baileys/labelStore";
 import { toJid } from "../jid";
 
@@ -18,9 +18,20 @@ labelsRouter.get("/sessions/:id/labels", async (req, res) => {
   }
 });
 
+// Relê as etiquetas direto do WhatsApp (use quando a lista vier vazia mesmo
+// com etiquetas criadas no aparelho). A auto-cura também faz isso sozinha.
+labelsRouter.post("/sessions/:id/labels/resync", async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await resyncLabels(id);
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    const message = (err as Error).message;
+    res.status(message === "session_not_connected" ? 503 : 502).json({ ok: false, error: message });
+  }
+});
+
 // Cria uma etiqueta nova, ou edita uma existente se você reenviar o mesmo id.
-// O WhatsApp não gera o id sozinho — normalmente usa-se um UUID ou um
-// contador próprio; guarde o id retornado pra reaproveitar depois.
 labelsRouter.post("/sessions/:id/labels", async (req, res) => {
   const { id } = req.params;
   const { label_id, name, color, deleted } = req.body as {
@@ -31,11 +42,8 @@ labelsRouter.post("/sessions/:id/labels", async (req, res) => {
   };
   if (!label_id) return res.status(400).json({ error: "label_id is required" });
 
-  const sock = getLiveSocket(id);
-  if (!sock) return res.status(409).json({ error: "session_not_connected" });
-
   const result = await upsertLabelDefinition(id, { id: label_id, name, color, deleted });
-  res.status(result.ok ? 200 : 502).json(result);
+  res.status(httpStatusFor(result)).json(result);
 });
 
 labelsRouter.post("/sessions/:id/labels/apply", async (req, res) => {
@@ -44,8 +52,8 @@ labelsRouter.post("/sessions/:id/labels/apply", async (req, res) => {
   if (!chat_id || !label_id) {
     return res.status(400).json({ error: "chat_id and label_id are required" });
   }
-  const result = await applyLabel(id, toJid(chat_id), label_id);
-  res.status(result.ok ? 200 : 502).json(result);
+  const result = await applyLabel(id, toJid(chat_id), String(label_id));
+  res.status(httpStatusFor(result)).json(result);
 });
 
 labelsRouter.post("/sessions/:id/labels/remove", async (req, res) => {
@@ -54,13 +62,11 @@ labelsRouter.post("/sessions/:id/labels/remove", async (req, res) => {
   if (!chat_id || !label_id) {
     return res.status(400).json({ error: "chat_id and label_id are required" });
   }
-  const result = await removeLabel(id, toJid(chat_id), label_id);
-  res.status(result.ok ? 200 : 502).json(result);
+  const result = await removeLabel(id, toJid(chat_id), String(label_id));
+  res.status(httpStatusFor(result)).json(result);
 });
 
-// Quais etiquetas um chat específico tem — não existia antes, por isso o
-// painel sempre mostrava "nenhuma etiqueta" mesmo com a aplicação
-// funcionando. Alimentado pelo evento labels.association (ver session.ts).
+// Quais etiquetas um chat específico tem.
 labelsRouter.get("/sessions/:id/labels/chats/:chatId", async (req, res) => {
   const { id, chatId } = req.params;
   try {

@@ -4,6 +4,8 @@
 // atrasado, etc. Sem isso, um container morto de fora não deixa nenhuma pista.
 
 import fs from "node:fs";
+import { takeDroppedNoiseCount } from "./consoleNoise";
+import { takeDecryptFailureCount } from "./decryptWatch";
 
 function readNum(path: string): number | null {
   try {
@@ -25,6 +27,17 @@ function hostMemAvailableMB(): number | null {
 
 const mb = (n: number | null) => (n === null ? "?" : Math.round(n / 1048576));
 
+// Preenchido pelo server.ts (evita import circular com session.ts).
+let liveCounter: () => { live: number; open: number } = () => ({ live: 0, open: 0 });
+export function setLiveCounter(fn: () => { live: number; open: number }): void {
+  liveCounter = fn;
+}
+
+let rejectionsThisMinute = 0;
+export function noteUnhandledRejection(): void {
+  rejectionsThisMinute++;
+}
+
 let closesThisMinute = 0;
 const closeCodes = new Map<string, number>();
 // Chamado a cada connection "close" de qualquer sessão — conta por código
@@ -44,10 +57,12 @@ export function installResourceLog(): void {
     expected = Date.now() + INTERVAL_MS;
     const m = process.memoryUsage();
     const cg = readNum("/sys/fs/cgroup/memory.current");
+    const sessions = liveCounter();
     console.log(
-      `[stats] rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}MB ext=${mb(m.external)}MB buf=${mb(m.arrayBuffers)}MB cgroup=${mb(cg)}MB hostAvail=${hostMemAvailableMB() ?? "?"}MB lag=${lag}ms up=${Math.round(process.uptime() / 60)}min closes=${closesThisMinute} codes=${JSON.stringify(Object.fromEntries(closeCodes))}`
+      `[stats] sessoes=${sessions.open}/${sessions.live} decrypt_falhas=${takeDecryptFailureCount()} ruido_descartado=${takeDroppedNoiseCount()} rejeicoes=${rejectionsThisMinute} rss=${mb(m.rss)}MB heap=${mb(m.heapUsed)}MB ext=${mb(m.external)}MB buf=${mb(m.arrayBuffers)}MB cgroup=${mb(cg)}MB hostAvail=${hostMemAvailableMB() ?? "?"}MB lag=${lag}ms up=${Math.round(process.uptime() / 60)}min closes=${closesThisMinute} codes=${JSON.stringify(Object.fromEntries(closeCodes))}`
     );
     closesThisMinute = 0;
+    rejectionsThisMinute = 0;
     closeCodes.clear();
   }, INTERVAL_MS).unref();
 }

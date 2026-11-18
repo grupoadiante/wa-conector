@@ -4,25 +4,24 @@ import { requireApiKey } from "./authMiddleware";
 import { sessionsRouter } from "./routes/sessions";
 import { messagesRouter } from "./routes/messages";
 import { labelsRouter } from "./routes/labels";
-import { resumeAllSessions, releaseAllLocksForShutdown } from "./baileys/session";
-import { installRawSignalErrorWatch } from "./baileys/rawSignalErrorWatch";
+import { resumeAllSessions, releaseAllLocksForShutdown, countLiveSessions } from "./baileys/session";
+import { installConsoleNoiseFilter } from "./baileys/consoleNoise";
 import { installLibsignalGuard, getQuarantinedContacts } from "./baileys/libsignalGuard";
 import { installEventLoopWatchdog } from "./baileys/eventLoopWatchdog";
-import { installResourceLog } from "./baileys/resourceLog";
+import { installResourceLog, noteUnhandledRejection, setLiveCounter } from "./baileys/resourceLog";
+import { installSelfHeal } from "./baileys/selfHeal";
 
-// Precisa instalar ANTES de qualquer sessão iniciar, senão perde os
-// primeiros erros crus do libsignal (ver rawSignalErrorWatch.ts). A partir
-// de agora cada sessão se registra como "sink" (em session.ts) e o próprio
-// contato é renegociado (assertSessions), não a sessão inteira reiniciada.
-installRawSignalErrorWatch();
+// Precisa instalar ANTES de qualquer sessão iniciar: o filtro descarta as
+// linhas que o libsignal escreve direto no console (inclusive o despejo de
+// chaves privadas das sessões).
+installConsoleNoiseFilter();
 installLibsignalGuard();
 installEventLoopWatchdog();
+setLiveCounter(countLiveSessions);
 installResourceLog();
 
-// Identificador de build — muda a cada versão que eu te mando, pra você
-// conseguir confirmar no log qual código está rodando de verdade, sem
-// depender de lembrar qual zip foi o último aplicado.
-const BUILD_VERSION = "2026-11-16-resource-log-v2";
+// Identificador de build — aparece no log de subida e em GET /version.
+const BUILD_VERSION = "2026-11-18-labels-mode-self-heal-v1";
 
 const app = express();
 app.use(express.json({ limit: "10mb" }));
@@ -34,7 +33,13 @@ app.get("/health", (_req, res) => res.json({ ok: true }));
 // Também público (sem API key) — pra confirmar por curl qual build está
 // rodando de verdade, sem precisar abrir o painel de logs do EasyPanel.
 app.get("/version", (_req, res) =>
-  res.json({ build: BUILD_VERSION, quarantined: getQuarantinedContacts(), rssMB: Math.round(process.memoryUsage().rss / 1048576) })
+  res.json({
+    build: BUILD_VERSION,
+    default_mode: config.defaultSessionMode,
+    sessions: countLiveSessions(),
+    quarantined: getQuarantinedContacts(),
+    rssMB: Math.round(process.memoryUsage().rss / 1048576),
+  })
 );
 
 app.use(requireApiKey);
@@ -50,6 +55,7 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 app.listen(config.port, () => {
   console.log(`wa-connector ouvindo na porta ${config.port} — build: ${BUILD_VERSION}`);
   resumeAllSessions().catch((err) => console.error("[resume] falha geral ao religar sessões", err));
+  installSelfHeal();
 });
 
 // EasyPanel manda SIGTERM antes de derrubar o container num redeploy. Libera
@@ -78,24 +84,34 @@ async function gracefulShutdown(reason: string, exitCode = 0) {
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM", 0));
 process.on("SIGINT", () => gracefulShutdown("SIGINT", 0));
 
-// ANTES: um erro não tratado só era logado e o processo continuava de pé.
-// Isso é perigoso aqui — um uncaughtException pode deixar o event loop ou
-// o estado interno do Baileys/libsignal corrompido sem matar o processo,
-// então o /health continua respondendo "ok" (o processo tecnicamente está
-// vivo) mas as sessões de WhatsApp param de processar de verdade. De fora
-// (EasyPanel, hospedagem) isso não aparece como pico de CPU/memória — o
-// processo só fica "zumbi" até alguém reiniciar manualmente. É o padrão
-// mais parecido com o que aconteceu: 13 sessões mudas por horas, sem uso
-// de recurso excessivo. Agora a gente sai de propósito (exit 1) pra forçar
-// o restart policy do container a subir um processo novo e saudável.
-process.on("uncaughtException", (err) => {
-  console.error("[uncaughtException] erro fatal — reiniciando o processo de forma controlada", err);
-  gracefulShutdown("uncaughtException", 1).catch(() => process.exit(1));
-});
-process.on("unhandledRejection", (reason) => {
-  console.error("[unhandledRejection] promise rejeitada sem catch — reiniciando o processo de forma controlada", reason);
-  gracefulShutdown("unhandledRejection", 1).catch(() => process.exit(1));
-});
+// Erro solto (promise sem catch / exceção não tratada).
+//
+// ANTES: qualquer um desses encerrava o processo. Com várias sessões no
+// mesmo processo, um erro em UM número derrubava TODOS — e o Baileys solta
+// rejeições assim em situações normais (consulta que expira, conexão que
+// fecha no meio de uma operação). O efeito era o servidor inteiro caindo e
+// voltando, com o CRM recebendo 502 do proxy nesse intervalo.
+//
+// AGORA: o erro é logado e contado. O processo só reinicia se vier uma
+// rajada (mais de FATAL_BURST em 1 minuto), que aí sim indica estado
+// corrompido. Sessão que ficou ruim é tratada pela auto-cura periódica.
+const FATAL_BURST = Number(process.env.FATAL_BURST || 40);
+let recentFatal: number[] = [];
+function noteFatal(kind: string, detail: unknown): void {
+  noteUnhandledRejection();
+  const message = detail instanceof Error ? `${detail.message}` : String(detail);
+  const where = detail instanceof Error ? (detail.stack ?? "").split("\n").slice(1, 3).join(" | ").trim() : "";
+  console.error(`[${kind}] ${message}${where ? ` — ${where}` : ""}`);
+  const now = Date.now();
+  recentFatal = recentFatal.filter((t) => now - t < 60_000);
+  recentFatal.push(now);
+  if (recentFatal.length > FATAL_BURST) {
+    console.error(`[${kind}] mais de ${FATAL_BURST} erros soltos em 1 minuto — reiniciando o processo de forma controlada`);
+    gracefulShutdown(`${kind}-burst`, 1).catch(() => process.exit(1));
+  }
+}
+process.on("uncaughtException", (err) => noteFatal("uncaughtException", err));
+process.on("unhandledRejection", (reason) => noteFatal("unhandledRejection", reason));
 
 // Watchdog de memória: os 13 números ficam todos carregados na mesma
 // máquina, cada um ocupando memória mesmo parado (chaves de sessão do

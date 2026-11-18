@@ -8,28 +8,52 @@ import makeWASocket, {
 import { Boom } from "@hapi/boom";
 import { useRedisAuthState, clearRedisAuthState, purgeJidSession } from "./authState";
 import { redis } from "../redis";
+import { config } from "../config";
 import { sendWebhookEvent } from "../webhook";
-import { SessionRecord, SessionStatus } from "../types";
-import { upsertLabelInStore, setChatLabelAssociation } from "./labelStore";
+import { SessionMode, SessionRecord, SessionStatus } from "../types";
+import {
+  upsertLabelInStore,
+  setChatLabelAssociation,
+  countLabelsInStore,
+  clearLabelStore,
+} from "./labelStore";
 import { downloadMedia, isDownloadableMedia } from "./media";
 import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCache";
 import { createConnectionWatchLogger, createFailureTracker, createZombieSocketWatch } from "./decryptWatch";
 import { acquireLock, releaseLock } from "./lock";
-import { registerRawSignalErrorSink } from "./rawSignalErrorWatch";
 import { noteSessionClose } from "./resourceLog";
 
 type Managed = {
   sock: WASocket;
+  mode: SessionMode;
   qrRetries: number;
-  unregisterRawSink: () => void;
+  startedAt: number;
+  openedAt: number | null;
+  // true quando NÓS pedimos para parar (stop, QR expirado). O evento de
+  // "close" que vem em seguida não pode religar a sessão.
+  stopping: boolean;
 };
 
-// Sessões vivas neste processo. Se o container reiniciar, o Redis ainda tem
-// as credenciais — a sessão só precisa ser recriada (não relogar via QR),
-// a menos que tenha sido um logout de verdade.
+export interface StartOptions {
+  mode?: SessionMode;
+  // Pedido explícito (API/painel): pode abrir uma sessão ainda não pareada
+  // para mostrar o QR. Reconexão automática e religamento no boot NÃO abrem
+  // sessão sem pareamento — era isso que deixava sessões órfãs em laço.
+  manual?: boolean;
+  // Reconexão logo depois de ler o QR (código 515): as credenciais acabaram
+  // de ser gravadas, então a sessão é tratada como pareada.
+  allowUnpaired?: boolean;
+}
+
+// Sessões vivas neste processo.
 const live = new Map<string, Managed>();
+const reconnectAttempts = new Map<string, number>();
+const reconnectTimers = new Map<string, NodeJS.Timeout>();
+const lastStatusSent = new Map<string, string>();
+const lastLabelResync = new Map<string, number>();
 
 const MAX_QR_RETRIES = 3;
+const MAX_BACKOFF_MS = 5 * 60_000;
 const recordKey = (id: string) => `wa:meta:${id}`;
 
 async function readRecord(id: string): Promise<SessionRecord | null> {
@@ -51,22 +75,64 @@ async function writeRecord(id: string, patch: Partial<SessionRecord>): Promise<S
   return next;
 }
 
+// Avisa o CRM só quando o status MUDA. Antes, cada QR novo e cada tentativa
+// de reconexão gerava um webhook — centenas por minuto com sessões paradas.
+async function notifyStatus(
+  id: string,
+  status: SessionStatus,
+  extra: Record<string, unknown> = {}
+): Promise<void> {
+  const key = `${status}:${String(extra.reason ?? "")}`;
+  if (lastStatusSent.get(id) === key) return;
+  lastStatusSent.set(id, key);
+  await sendWebhookEvent(id, "session.status", { status, ...extra });
+}
+
 export async function getSessionRecord(id: string): Promise<SessionRecord | null> {
   return readRecord(id);
 }
 
 export async function listSessionIds(): Promise<string[]> {
-  const keys = await redis.keys("wa:meta:*");
-  return keys.map((k) => k.replace("wa:meta:", ""));
+  const ids: string[] = [];
+  const stream = redis.scanStream({ match: "wa:meta:*", count: 200 });
+  for await (const keys of stream) {
+    for (const k of keys as string[]) ids.push(k.replace("wa:meta:", ""));
+  }
+  return ids;
 }
 
 export function getLiveSocket(id: string): WASocket | null {
   return live.get(id)?.sock ?? null;
 }
 
-// Ping leve: confirma que o socket ainda responde antes de operações
-// arriscadas (labels) e depois delas — é o que detecta a queda a tempo de
-// reconectar sozinho em vez de deixar o front achar que ainda está tudo bem.
+export interface LiveInfo {
+  mode: SessionMode;
+  wsOpen: boolean;
+  startedAt: number;
+  openedAt: number | null;
+  qrRetries: number;
+}
+
+export function getLiveInfo(id: string): LiveInfo | null {
+  const m = live.get(id);
+  if (!m) return null;
+  return {
+    mode: m.mode,
+    wsOpen: m.sock.ws.isOpen,
+    startedAt: m.startedAt,
+    openedAt: m.openedAt,
+    qrRetries: m.qrRetries,
+  };
+}
+
+export function hasPendingReconnect(id: string): boolean {
+  return reconnectTimers.has(id);
+}
+
+export function getReconnectAttempts(id: string): number {
+  return reconnectAttempts.get(id) ?? 0;
+}
+
 export async function isSessionHealthy(id: string): Promise<boolean> {
   const managed = live.get(id);
   if (!managed) return false;
@@ -74,9 +140,8 @@ export async function isSessionHealthy(id: string): Promise<boolean> {
 }
 
 // Apaga a sessão Signal corrompida de UM contato e força o Baileys a montar
-// uma limpa do zero. Usado tanto pela auto-cura (decrypt-watch/raw-signal)
-// quanto pelo endpoint POST /sessions/:id/purge-jid (chamado manualmente ou
-// pelo Lovable). `label` só identifica quem chamou, pro log.
+// uma limpa do zero. Usado pela auto-cura do modo "full" e pelo endpoint
+// POST /sessions/:id/purge-jid.
 export async function purgeAndRenegotiate(
   id: string,
   jid: string,
@@ -95,23 +160,85 @@ export async function purgeAndRenegotiate(
   }
 }
 
-export async function startSession(id: string): Promise<SessionRecord> {
+// A versão do WhatsApp Web muda raramente — consultar a cada reconexão de
+// cada sessão era uma chamada de rede à toa.
+let cachedVersion: { version: [number, number, number]; at: number } | null = null;
+async function getWaVersion(): Promise<[number, number, number]> {
+  if (cachedVersion && Date.now() - cachedVersion.at < 6 * 3600_000) return cachedVersion.version;
+  const { version } = await fetchLatestBaileysVersion();
+  cachedVersion = { version, at: Date.now() };
+  return version;
+}
+
+// Modo "labels": quais remetentes o Baileys deve ignorar SEM decifrar.
+//
+// Uma linha de etiquetas recebe cópia de tudo o que o número envia e recebe.
+// Decifrar isso não serve para etiquetar e era a origem de toda a carga
+// (falhas de decriptação, renegociações, download de mídia). Então ignoramos
+// todo mundo, com duas exceções obrigatórias:
+//  - o servidor do WhatsApp ("s.whatsapp.net", sem usuário): por ele chegam
+//    os avisos de sincronização das etiquetas;
+//  - o APARELHO PRINCIPAL da própria conta (sem sufixo ":N"): é ele que
+//    envia as chaves de sincronização sem as quais não dá para etiquetar.
+// Os outros aparelhos da conta (":N" — o WAHA, o WhatsApp Web) são ignorados:
+// são eles que mandam as cópias das mensagens do bot.
+function makeLabelsOnlyFilter(getMe: () => { id?: string; lid?: string } | undefined) {
+  return (jid: string): boolean => {
+    if (!jid) return false;
+    const at = jid.indexOf("@");
+    if (at <= 0) return false;
+    const [user, device] = jid.slice(0, at).split(":");
+    if (!device) {
+      const me = getMe();
+      const mine = [me?.id, me?.lid]
+        .filter((j): j is string => !!j)
+        .map((j) => j.split("@")[0].split(":")[0]);
+      if (mine.includes(user)) return false;
+    }
+    return true;
+  };
+}
+
+function clearReconnectTimer(id: string): void {
+  const t = reconnectTimers.get(id);
+  if (t) {
+    clearTimeout(t);
+    reconnectTimers.delete(id);
+  }
+}
+
+function scheduleReconnect(id: string, delayMs: number, opts: StartOptions): void {
+  clearReconnectTimer(id);
+  const timer = setTimeout(() => {
+    reconnectTimers.delete(id);
+    startSession(id, opts).catch((err) =>
+      console.error(`[session:${id}] falha ao reconectar`, (err as Error).message)
+    );
+  }, delayMs);
+  reconnectTimers.set(id, timer);
+}
+
+// Espera crescente entre reconexões da MESMA sessão: 2s, 4s, 8s... até 5 min.
+// Volta a zero quando a conexão fica estável por 1 minuto.
+function nextBackoffMs(id: string, baseMs: number): number {
+  const attempts = reconnectAttempts.get(id) ?? 0;
+  reconnectAttempts.set(id, attempts + 1);
+  const exp = Math.min(baseMs * 2 ** Math.min(attempts, 10), MAX_BACKOFF_MS);
+  return exp + Math.floor(Math.random() * 3000);
+}
+
+export async function startSession(id: string, opts: StartOptions = {}): Promise<SessionRecord> {
   const existing = live.get(id);
   if (existing) return (await readRecord(id))!;
 
+  clearReconnectTimer(id);
+
   // Evita dois processos (container antigo + novo durante um redeploy)
-  // segurando a mesma sessão do WhatsApp ao mesmo tempo — isso corrompia
-  // as chaves de criptografia por contato (ver lock.ts). Se não conseguir
-  // o lock, outro processo já está com essa sessão viva; tenta de novo em
-  // breve em vez de brigar por ela.
+  // segurando a mesma sessão do WhatsApp ao mesmo tempo.
   const gotLock = await acquireLock(id);
   if (!gotLock) {
     console.warn(`[session:${id}] lock ocupado por outro processo — tentando de novo em 5s`);
-    setTimeout(() => {
-      startSession(id).catch((err) =>
-        console.error(`[session:${id}] falha ao tentar de novo após lock ocupado`, err)
-      );
-    }, 5000);
+    scheduleReconnect(id, 5000, opts);
     return (await readRecord(id)) ?? {
       id,
       status: "starting",
@@ -122,49 +249,39 @@ export async function startSession(id: string): Promise<SessionRecord> {
     };
   }
 
-  await writeRecord(id, { status: "starting", qr: null });
-
   const { state, saveCreds } = await useRedisAuthState(id);
-  const { version } = await fetchLatestBaileysVersion();
+  const paired = !!state.creds.me?.id;
+  const previous = await readRecord(id);
+  const mode: SessionMode = opts.mode ?? previous?.mode ?? config.defaultSessionMode;
 
-  // Escuta falhas repetidas de decriptação com o mesmo contato e renegocia
-  // a sessão automaticamente (assertSessions com force) — sem isso, um
-  // contato preso em "Aguardando mensagem" só destrava com intervenção
-  // manual, como identificamos hoje. O tracker é compartilhado entre o
-  // logger (falhas de decriptação de verdade) e o handler de mensagens
-  // (mensagens "stub" vazias — ver comentário em decryptWatch.ts).
-  const failureTracker = createFailureTracker(id, (jid) => {
-    purgeAndRenegotiate(id, jid, "decrypt-watch").catch(() => {
-      /* já logado dentro de purgeAndRenegotiate */
-    });
-  });
+  // Sessão que nunca leu o QR só abre quando alguém pede (painel/API).
+  if (!paired && !opts.manual && !opts.allowUnpaired) {
+    await releaseLock(id);
+    const rec = await writeRecord(id, { status: "disconnected", qr: null, mode, paired: false });
+    console.log(`[session:${id}] sem pareamento — não religada automaticamente (aguardando pedido de QR)`);
+    return rec;
+  }
+
+  await writeRecord(id, { status: "starting", qr: null, mode, paired });
+
+  const version = await getWaVersion();
+  const labelsOnly = mode === "labels";
+
+  // Renegociação automática por contato: só no modo "full", só para falha de
+  // mensagem recebida de lead, e com teto por minuto (ver decryptWatch.ts).
+  const failureTracker = labelsOnly
+    ? null
+    : createFailureTracker(id, (jid) => {
+        purgeAndRenegotiate(id, jid, "decrypt-watch").catch(() => {
+          /* já logado dentro de purgeAndRenegotiate */
+        });
+      });
   const zombieWatch = createZombieSocketWatch(id, () => {
     restartSession(id).catch((err) =>
-      console.error(`[zombie-watch:${id}] falha ao reiniciar sessão`, err)
+      console.error(`[zombie-watch:${id}] falha ao reiniciar sessão`, (err as Error).message)
     );
   });
   const sessionLogger = createConnectionWatchLogger(id, failureTracker, zombieWatch);
-
-  // Liga o watcher de erros crus do libsignal (console.error direto, fora
-  // do logger) no mesmo tracker por-jid — assertSessions específico do
-  // contato, não reiniciar a sessão inteira à toa.
-  const unregisterRawSink = registerRawSignalErrorSink({
-    noteRawFailure: (numericId) => failureTracker.noteFailure(`${numericId}@s.whatsapp.net`, "raw_signal"),
-    giveUpOn: (numericId) => {
-      const managed = live.get(id);
-      if (!managed) return;
-      // Bloqueia nas duas formas de JID que esse contato pode ter (número
-      // normal e o identificador "lid") — só uma delas costuma existir de
-      // verdade pro Baileys, a outra falha silenciosa e sem problema.
-      for (const suffix of ["@s.whatsapp.net", "@lid"]) {
-        const jid = `${numericId}${suffix}`;
-        managed.sock.updateBlockStatus(jid, "block").catch(() => {
-          /* contato pode não existir nessa forma de JID nesta sessão — ok */
-        });
-      }
-      console.warn(`[session:${id}] contato ${numericId} bloqueado automaticamente (incompatível com o protocolo)`);
-    },
-  });
 
   const sock = makeWASocket({
     version,
@@ -176,119 +293,160 @@ export async function startSession(id: string): Promise<SessionRecord> {
     printQRInTerminal: false,
     browser: ["WA Connector", "Chrome", "1.0.0"],
     syncFullHistory: false,
-    // Resolve o "Waiting for this message" — ver comentários em msgCache.ts.
     msgRetryCounterCache,
     getMessage: async (key) => getCachedMessage(key),
+    ...(labelsOnly
+      ? {
+          // Linha de etiquetas: não aparece "online" (senão o celular para de
+          // notificar), não baixa histórico e não decifra mensagens.
+          markOnlineOnConnect: false,
+          emitOwnEvents: false,
+          shouldSyncHistoryMessage: () => false,
+          shouldIgnoreJid: makeLabelsOnlyFilter(() => sock?.user ?? state.creds.me),
+        }
+      : {}),
   });
 
-  live.set(id, { sock, qrRetries: 0, unregisterRawSink });
+  const managed: Managed = {
+    sock,
+    mode,
+    qrRetries: 0,
+    startedAt: Date.now(),
+    openedAt: null,
+    stopping: false,
+  };
+  live.set(id, managed);
 
   sock.ev.on("creds.update", saveCreds);
 
   sock.ev.on("connection.update", async (update) => {
-    const { connection, lastDisconnect, qr } = update;
-    const managed = live.get(id);
+    try {
+      const { connection, lastDisconnect, qr } = update;
+      // Evento de um socket antigo, ou de uma parada que nós pedimos: ignora.
+      if (live.get(id) !== managed || managed.stopping) return;
 
-    if (qr) {
-      const retries = (managed?.qrRetries ?? 0) + 1;
-      if (managed) managed.qrRetries = retries;
-      if (retries > MAX_QR_RETRIES) {
-        await writeRecord(id, { status: "disconnected", qr: null });
-        await sendWebhookEvent(id, "session.status", { status: "disconnected", reason: "qr_expired" });
-        live.delete(id);
-        sock.end(undefined as any);
-        return;
-      }
-      await writeRecord(id, { status: "qr_pending", qr });
-      await sendWebhookEvent(id, "session.status", { status: "qr_pending", qr });
-    }
-
-    if (connection === "open") {
-      const me = sock.user;
-      await writeRecord(id, {
-        status: "connected",
-        qr: null,
-        phoneNumber: me?.id?.split(":")[0]?.split("@")[0] ?? null,
-        pushName: me?.name ?? null,
-      });
-      await sendWebhookEvent(id, "session.status", {
-        status: "connected",
-        phone_number: me?.id?.split(":")[0]?.split("@")[0] ?? null,
-        push_name: me?.name ?? null,
-      });
-    }
-
-    if (connection === "close") {
-      const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
-      const loggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 403;
-
-      noteSessionClose(statusCode);
-      console.warn(`[session:${id}] conexão fechada (código ${statusCode ?? "?"}): ${(lastDisconnect?.error as Error)?.message ?? "sem detalhe"}`);
-
-      live.delete(id);
-
-      if (loggedOut) {
-        // Logout de verdade: precisa ler QR de novo. Limpa credenciais.
-        await clearRedisAuthState(id);
-        await writeRecord(id, { status: "disconnected", qr: null });
-        await sendWebhookEvent(id, "session.status", { status: "disconnected", reason: "logged_out" });
-        return;
+      if (qr) {
+        managed.qrRetries += 1;
+        if (managed.qrRetries > MAX_QR_RETRIES) {
+          // QR expirou sem ninguém ler: para de vez. Só volta com novo pedido.
+          managed.stopping = true;
+          live.delete(id);
+          try {
+            sock.end(undefined as any);
+          } catch {
+            /* já encerrado */
+          }
+          await releaseLock(id);
+          await writeRecord(id, { status: "disconnected", qr: null });
+          await notifyStatus(id, "disconnected", { reason: "qr_expired" });
+          console.log(`[session:${id}] QR expirou sem leitura — sessão parada (não tenta de novo sozinha)`);
+          return;
+        }
+        await writeRecord(id, { status: "qr_pending", qr });
+        await notifyStatus(id, "qr_pending");
       }
 
-      // Queda recuperável (inclusive a que costuma seguir uma operação de
-      // label): reconecta sozinho, sem exigir QR e sem intervenção humana.
-      // Jitter aleatório (2-15s) — se várias sessões caírem juntas (queda
-      // de rede, restart), evita que todas reconectem no mesmo instante.
-      await writeRecord(id, { status: "failed" });
-      await sendWebhookEvent(id, "session.status", { status: "failed", reason: "reconnecting" });
-      const reconnectDelay = 2000 + Math.floor(Math.random() * 13000);
-      setTimeout(() => {
-        startSession(id).catch((err) =>
-          console.error(`[session:${id}] falha ao reconectar`, err)
+      if (connection === "open") {
+        managed.openedAt = Date.now();
+        const me = sock.user;
+        const phone = me?.id?.split(":")[0]?.split("@")[0] ?? null;
+        await writeRecord(id, {
+          status: "connected",
+          qr: null,
+          phoneNumber: phone,
+          pushName: me?.name ?? null,
+          paired: true,
+        });
+        await notifyStatus(id, "connected", { phone_number: phone, push_name: me?.name ?? null });
+        // Conexão estável por 1 minuto zera a espera crescente.
+        setTimeout(() => {
+          if (live.get(id) === managed && sock.ws.isOpen) reconnectAttempts.delete(id);
+        }, 60_000).unref();
+      }
+
+      if (connection === "close") {
+        const statusCode = (lastDisconnect?.error as Boom)?.output?.statusCode;
+        const loggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 403;
+        const restartRequired = statusCode === DisconnectReason.restartRequired;
+
+        noteSessionClose(statusCode);
+        console.warn(
+          `[session:${id}] conexão fechada (código ${statusCode ?? "?"}): ${(lastDisconnect?.error as Error)?.message ?? "sem detalhe"}`
         );
-      }, reconnectDelay);
+
+        live.delete(id);
+
+        if (loggedOut) {
+          // Logout de verdade: precisa ler QR de novo. Limpa credenciais.
+          await clearRedisAuthState(id);
+          await releaseLock(id);
+          reconnectAttempts.delete(id);
+          await writeRecord(id, { status: "disconnected", qr: null, paired: false });
+          await notifyStatus(id, "disconnected", { reason: "logged_out" });
+          return;
+        }
+
+        const pairedNow = !!state.creds.me?.id;
+        if (!pairedNow && !restartRequired) {
+          // Nunca foi pareada: não fica tentando sozinha.
+          await releaseLock(id);
+          await writeRecord(id, { status: "disconnected", qr: null, paired: false });
+          await notifyStatus(id, "disconnected", { reason: "not_paired" });
+          return;
+        }
+
+        // Garante que as credenciais recém-recebidas (pareamento) estão no
+        // Redis antes de abrir o próximo socket.
+        try {
+          await saveCreds();
+        } catch {
+          /* best effort */
+        }
+
+        await writeRecord(id, { status: "failed" });
+        await notifyStatus(id, "failed", { reason: "reconnecting" });
+
+        // 515 = reinício pedido pelo WhatsApp logo após o pareamento (rápido).
+        // 440 = outra conexão assumiu esta sessão: espera mais, sem brigar.
+        const delay = restartRequired
+          ? 1500
+          : nextBackoffMs(id, statusCode === DisconnectReason.connectionReplaced ? 60_000 : 2000);
+        scheduleReconnect(id, delay, { allowUnpaired: true });
+      }
+    } catch (err) {
+      console.error(`[session:${id}] erro tratando connection.update`, (err as Error).message);
     }
   });
 
-  sock.ev.on("messages.upsert", async (m) => {
-    for (const msg of m.messages) {
-      rememberMessage(msg);
+  // Mensagens só são repassadas no modo "full". No modo "labels" o Baileys
+  // nem as decifra (ver makeLabelsOnlyFilter).
+  if (!labelsOnly) {
+    sock.ev.on("messages.upsert", async (m) => {
+      for (const msg of m.messages) {
+        try {
+          rememberMessage(msg);
 
-      // Mensagens de grupo (@g.us) e de listas de transmissão (@broadcast)
-      // não são tratadas como conversa de lead — nunca repassa pro CRM,
-      // pra evitar o bot respondendo dentro de um grupo.
-      const remoteJid = msg.key?.remoteJid ?? "";
-      if (remoteJid.endsWith("@g.us") || remoteJid.endsWith("@broadcast")) {
-        continue;
+          const remoteJid = msg.key?.remoteJid ?? "";
+          if (remoteJid.endsWith("@g.us") || remoteJid.endsWith("@broadcast")) continue;
+
+          // Mensagem "stub" vazia de um lead conta como falha de decriptação.
+          if (msg.messageStubType === WAMessageStubType.CIPHERTEXT && !msg.key?.fromMe) {
+            failureTracker?.noteFailure(remoteJid, "stub_vazio");
+          }
+
+          let media: { base64: string; mimetype: string | null; filename: string | null } | null = null;
+          if (isDownloadableMedia(msg)) {
+            media = await downloadMedia(sock, id, msg);
+          }
+          await sendWebhookEvent(id, "message", { ...msg, media });
+        } catch (err) {
+          console.error(`[session:${id}] erro tratando mensagem recebida`, (err as Error).message);
+        }
       }
+    });
+  }
 
-      // Mensagem "stub" vazia (o WhatsApp entrega um envelope sem conteúdo,
-      // "Message absent from node") — isso NUNCA gera erro de log, então
-      // sem essa checagem aqui o failureTracker nunca saberia que esse
-      // contato está tendo problema. Conta pro mesmo limite das falhas de
-      // decriptação de verdade.
-      if (
-        msg.messageStubType === WAMessageStubType.CIPHERTEXT &&
-        !msg.key?.fromMe
-      ) {
-        failureTracker.noteFailure(remoteJid, "stub_vazio");
-      }
-
-      // Mídia (imagem/vídeo/áudio/documento/figurinha) precisa ser baixada
-      // e DECRIPTADA aqui — só o socket com a sessão ativa tem as chaves.
-      // O upload pro Storage acontece do lado do custom-webhook, que já tem
-      // acesso embutido às credenciais do Supabase.
-      let media: { base64: string; mimetype: string | null; filename: string | null } | null = null;
-      if (isDownloadableMedia(msg)) {
-        media = await downloadMedia(sock, id, msg);
-      }
-      await sendWebhookEvent(id, "message", { ...msg, media });
-    }
-  });
-
-  // Mantém o cache de definições de etiqueta atualizado — o Baileys não
-  // expõe uma lista pronta, só avisa por evento quando algo muda (inclusive
-  // no sync inicial da sessão, quando ele reenvia todas as existentes).
+  // Cache das definições de etiqueta — o Baileys só avisa por evento.
   sock.ev.on("labels.edit", async (label) => {
     try {
       await upsertLabelInStore(id, {
@@ -298,38 +456,66 @@ export async function startSession(id: string): Promise<SessionRecord> {
         deleted: !!label.deleted,
       });
     } catch (err) {
-      console.error(`[session:${id}] falha ao gravar label no cache`, err);
+      console.error(`[session:${id}] falha ao gravar label no cache`, (err as Error).message);
     }
   });
 
-  // Rastreia quais etiquetas cada chat tem — só chega por evento, não tem
-  // "get" pronto no Baileys pra isso. É o que faltava pra GET /labels/chats
-  // funcionar (antes só dava pra aplicar/remover às cegas).
+  // Quais etiquetas cada chat tem — também só chega por evento.
   sock.ev.on("labels.association", async ({ association, type }) => {
-    if (association.type !== "label_jid") return; // ignora associação em mensagem específica
+    if (association.type !== "label_jid") return;
     try {
       await setChatLabelAssociation(id, association.chatId, association.labelId, type === "add");
     } catch (err) {
-      console.error(`[session:${id}] falha ao gravar associação de label`, err);
+      console.error(`[session:${id}] falha ao gravar associação de label`, (err as Error).message);
     }
   });
 
   return (await readRecord(id))!;
 }
 
+// Relê as etiquetas direto do WhatsApp. O cache local só é preenchido por
+// evento; se o evento se perde (ex.: sessão criada num momento ruim), a lista
+// fica vazia para sempre e nada é etiquetado. Aqui a versão local do estado é
+// zerada para o WhatsApp reenviar tudo, o que dispara os eventos de novo.
+export async function resyncLabels(id: string): Promise<{ before: number; after: number }> {
+  const managed = live.get(id);
+  if (!managed || !managed.sock.ws.isOpen) throw new Error("session_not_connected");
+  lastLabelResync.set(id, Date.now());
+
+  const before = await countLabelsInStore(id);
+  const run = async (
+    collections: ("critical_unblock_low" | "regular_high" | "regular_low" | "critical_block" | "regular")[]
+  ) => {
+    const reset: Record<string, null> = {};
+    for (const c of collections) reset[c] = null;
+    await managed.sock.authState.keys.set({ "app-state-sync-version": reset } as any);
+    await managed.sock.resyncAppState(collections, true);
+    await new Promise((r) => setTimeout(r, 2000)); // eventos gravam no Redis
+  };
+
+  await run(["regular"]);
+  let after = await countLabelsInStore(id);
+  if (after === 0) {
+    await run(["regular_high", "regular_low", "critical_block", "critical_unblock_low"]);
+    after = await countLabelsInStore(id);
+  }
+  console.log(`[labels:${id}] etiquetas relidas do WhatsApp (antes=${before}, depois=${after})`);
+  return { before, after };
+}
+
+export function getLastLabelResync(id: string): number {
+  return lastLabelResync.get(id) ?? 0;
+}
+
 export async function stopSession(id: string, wipe: boolean): Promise<void> {
+  clearReconnectTimer(id);
   const managed = live.get(id);
   if (managed) {
-    managed.unregisterRawSink();
-    managed.sock.ev.removeAllListeners("connection.update");
+    managed.stopping = true;
+    live.delete(id);
     try {
       if (wipe) {
-        // Desvincula de verdade no WhatsApp (avisa o servidor pra soltar
-        // esse "aparelho"), não só derruba a conexão local. Sem isso,
-        // toda vez que apagávamos uma sessão ficava um vínculo fantasma
-        // ativo do lado do WhatsApp, que pode confundir qual sessão é a
-        // "real" — especialmente relevante pra números que já tiveram
-        // histórico de coexistência com a Cloud API.
+        // Desvincula de verdade no WhatsApp, não só derruba a conexão local.
         await managed.sock.logout();
       } else {
         managed.sock.end(undefined as any);
@@ -337,66 +523,50 @@ export async function stopSession(id: string, wipe: boolean): Promise<void> {
     } catch (err) {
       console.error(`[session:${id}] falha ao ${wipe ? "deslogar" : "encerrar"} socket`, (err as Error).message);
     }
-    live.delete(id);
   }
   await releaseLock(id);
+  reconnectAttempts.delete(id);
   if (wipe) {
     await clearRedisAuthState(id);
     await redis.del(recordKey(id));
+    await clearLabelStore(id);
+    lastStatusSent.delete(id);
+    lastLabelResync.delete(id);
   } else {
     await writeRecord(id, { status: "disconnected" });
   }
 }
 
-export async function restartSession(id: string): Promise<SessionRecord> {
+export async function restartSession(id: string, opts: StartOptions = {}): Promise<SessionRecord> {
   await stopSession(id, false);
-  return startSession(id);
+  return startSession(id, opts);
 }
 
-// Chamado uma vez na inicialização do processo. O container pode reiniciar
-// (redeploy, crash, restart manual) sem que ninguém chame /sessions/:id de
-// novo — sem isso, a sessão fica com credenciais salvas no Redis mas nenhum
-// socket vivo, e todo envio falha com 409 até alguém notar. Aqui a gente
-// religa sozinho qualquer sessão que não estava explicitamente desconectada.
-// Espera aleatória (0 a 15s) — evita que 12+ sessões todas tentem religar
-// no mesmo instante depois de um restart/redeploy. Isso sozinho já causava
-// timeouts em cadeia (tanto no "init queries" do Baileys quanto em
-// renegociação de sessão), porque todas competiam pela mesma "porta de
-// entrada" do WhatsApp ao mesmo tempo.
-const MAX_RESUME_STAGGER_MS = 15_000;
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// Chamado uma vez na inicialização do processo: religa as sessões que
+// estavam ativas. Sessão "disconnected" ou sem pareamento não é religada.
+const MAX_RESUME_STAGGER_MS = 20_000;
 
 export async function resumeAllSessions(): Promise<void> {
   const ids = await listSessionIds();
+  let scheduled = 0;
   for (const id of ids) {
     const record = await readRecord(id);
     if (!record || record.status === "disconnected") continue;
     const delay = Math.floor(Math.random() * MAX_RESUME_STAGGER_MS);
-    console.log(`[resume] religando sessão ${id} em ${delay}ms (status salvo: ${record.status})`);
-    sleep(delay)
-      .then(() => startSession(id))
-      .catch((err) => console.error(`[resume] falha ao religar sessão ${id}`, err));
+    scheduled++;
+    scheduleReconnect(id, delay, {});
   }
+  console.log(`[resume] ${scheduled} de ${ids.length} sessões agendadas para religar`);
 }
 
-// Chamado no desligamento (SIGTERM) — libera os locks das sessões vivas
-// neste processo, sem tentar fechar os sockets com calma (o processo está
-// morrendo de qualquer forma). O container novo assume mais rápido.
+// Chamado no desligamento (SIGTERM) — libera os locks das sessões vivas.
 export async function releaseAllLocksForShutdown(): Promise<void> {
   const ids = [...live.keys()];
   await Promise.all(ids.map((id) => releaseLock(id)));
 }
 
-// Chamado pelo rawSignalErrorWatch quando uma rajada de erros crus do
-// libsignal (sem contato identificado) indica que o processo inteiro está
-// com estado de sessão degradado — reinicia tudo que está vivo agora.
-export async function restartAllLiveSessions(): Promise<void> {
-  const ids = [...live.keys()];
-  for (const id of ids) {
-    restartSession(id).catch((err) =>
-      console.error(`[raw-signal-watch] falha ao reiniciar sessão ${id}`, err)
-    );
-  }
+export function countLiveSessions(): { live: number; open: number } {
+  let open = 0;
+  for (const m of live.values()) if (m.sock.ws.isOpen) open++;
+  return { live: live.size, open };
 }

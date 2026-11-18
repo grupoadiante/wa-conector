@@ -1,5 +1,7 @@
 import { Router } from "express";
 import QRCode from "qrcode";
+import { SessionMode } from "../types";
+import { describeAllSessions, describeSession, getLastSelfHealReport, runSelfHeal } from "../baileys/selfHeal";
 import {
   getSessionRecord,
   listSessionIds,
@@ -12,10 +14,17 @@ import {
 export const sessionsRouter = Router();
 
 // Cria (ou reaproveita) uma sessão e começa o processo de pareamento.
+// Body opcional: { "mode": "labels" | "full" }. Sem body, usa o modo já
+// gravado na sessão ou o padrão (DEFAULT_SESSION_MODE, hoje "labels").
+function modeFrom(body: unknown): SessionMode | undefined {
+  const m = String((body as any)?.mode ?? "").toLowerCase();
+  return m === "labels" || m === "full" ? m : undefined;
+}
+
 sessionsRouter.post("/sessions/:id", async (req, res) => {
   const { id } = req.params;
   try {
-    const record = await startSession(id);
+    const record = await startSession(id, { manual: true, mode: modeFrom(req.body) });
     res.json(record);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -45,10 +54,40 @@ sessionsRouter.get("/sessions", async (_req, res) => {
   res.json({ sessions: ids });
 });
 
+// Painel de saúde: uma linha por sessão (status, modo, pareada, socket
+// aberto, quantas etiquetas no cache) + o resultado da última auto-cura.
+sessionsRouter.get("/sessions-health", async (_req, res) => {
+  try {
+    const sessions = await describeAllSessions();
+    res.json({
+      total: sessions.length,
+      connected: sessions.filter((s) => s.ws_open).length,
+      not_paired: sessions.filter((s) => !s.paired).map((s) => s.id),
+      last_self_heal: getLastSelfHealReport(),
+      sessions,
+    });
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+sessionsRouter.get("/sessions/:id/health", async (req, res) => {
+  res.json(await describeSession(req.params.id));
+});
+
+// Roda a auto-cura agora (ela também roda sozinha de tempo em tempo).
+sessionsRouter.post("/self-heal/run", async (_req, res) => {
+  try {
+    res.json(await runSelfHeal("manual"));
+  } catch (err) {
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 sessionsRouter.post("/sessions/:id/restart", async (req, res) => {
   const { id } = req.params;
   try {
-    const record = await restartSession(id);
+    const record = await restartSession(id, { manual: true, mode: modeFrom(req.body) });
     res.json(record);
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
@@ -79,6 +118,10 @@ sessionsRouter.post("/sessions/:id/purge-jid", async (req, res) => {
 sessionsRouter.delete("/sessions/:id", async (req, res) => {
   const { id } = req.params;
   const wipe = req.query.wipe !== "false";
-  await stopSession(id, wipe);
-  res.json({ ok: true });
+  try {
+    await stopSession(id, wipe);
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: (err as Error).message });
+  }
 });
