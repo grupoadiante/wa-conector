@@ -176,27 +176,45 @@ async function getWaVersion(): Promise<[number, number, number]> {
 // Uma linha de etiquetas recebe cópia de tudo o que o número envia e recebe.
 // Decifrar isso não serve para etiquetar e era a origem de toda a carga
 // (falhas de decriptação, renegociações, download de mídia). Então ignoramos
-// todo mundo, com duas exceções obrigatórias:
+// todo mundo, com três exceções obrigatórias:
 //  - o servidor do WhatsApp ("s.whatsapp.net", sem usuário): por ele chegam
 //    os avisos de sincronização das etiquetas;
-//  - o APARELHO PRINCIPAL da própria conta (sem sufixo ":N"): é ele que
-//    envia as chaves de sincronização sem as quais não dá para etiquetar.
+//  - o APARELHO PRINCIPAL da própria conta (sem sufixo ":N", ou ":0"): é ele
+//    que envia as chaves de sincronização sem as quais não dá para etiquetar;
+//  - TUDO, enquanto a linha ainda não recebeu as chaves de sincronização
+//    (pareamento recém-feito). Nessa janela a linha se comporta exatamente
+//    como antes do modo "labels", para o pareamento não depender do filtro.
+//    O filtro só liga depois que as chaves chegaram.
 // Os outros aparelhos da conta (":N" — o WAHA, o WhatsApp Web) são ignorados:
 // são eles que mandam as cópias das mensagens do bot.
-function makeLabelsOnlyFilter(getMe: () => { id?: string; lid?: string } | undefined) {
+function makeLabelsOnlyFilter(
+  sessionId: string,
+  getMe: () => { id?: string; lid?: string } | undefined,
+  hasSyncKeys: () => boolean
+) {
+  // Diagnóstico: registra uma vez cada forma de remetente da própria conta.
+  const seenOwn = new Set<string>();
   return (jid: string): boolean => {
     if (!jid) return false;
     const at = jid.indexOf("@");
     if (at <= 0) return false;
+    if (!hasSyncKeys()) return false; // janela de pareamento: não filtra nada
+
     const [user, device] = jid.slice(0, at).split(":");
-    if (!device) {
-      const me = getMe();
-      const mine = [me?.id, me?.lid]
-        .filter((j): j is string => !!j)
-        .map((j) => j.split("@")[0].split(":")[0]);
-      if (mine.includes(user)) return false;
+    const me = getMe();
+    const mine = [me?.id, me?.lid]
+      .filter((j): j is string => !!j)
+      .map((j) => j.split("@")[0].split(":")[0]);
+    if (!mine.includes(user)) return true; // lead, grupo, lista: ignora
+
+    const primary = !device || device === "0";
+    if (seenOwn.size < 12 && !seenOwn.has(jid)) {
+      seenOwn.add(jid);
+      console.log(
+        `[filter:${sessionId}] remetente da própria conta: ${jid} -> ${primary ? "processa (celular principal)" : "ignora (aparelho vinculado)"}`
+      );
     }
-    return true;
+    return !primary;
   };
 }
 
@@ -307,7 +325,11 @@ export async function startSession(id: string, opts: StartOptions = {}): Promise
           markOnlineOnConnect: false,
           emitOwnEvents: false,
           shouldSyncHistoryMessage: () => false,
-          shouldIgnoreJid: makeLabelsOnlyFilter(() => sock?.user ?? state.creds.me),
+          shouldIgnoreJid: makeLabelsOnlyFilter(
+            id,
+            () => sock?.user ?? state.creds.me,
+            () => !!state.creds.myAppStateKeyId
+          ),
         }
       : {}),
   });
@@ -322,7 +344,28 @@ export async function startSession(id: string, opts: StartOptions = {}): Promise
   };
   live.set(id, managed);
 
-  sock.ev.on("creds.update", saveCreds);
+  // Avisa no log quando as chaves de sincronização chegam (ou são renovadas)
+  // e, se a lista de etiquetas ainda estiver vazia, relê em seguida.
+  let knownSyncKey = state.creds.myAppStateKeyId ?? null;
+  if (!knownSyncKey) {
+    console.log(`[labels:${id}] aguardando chaves de sincronização do celular (linha recém-pareada ou sem chaves)`);
+  }
+  sock.ev.on("creds.update", (update) => {
+    saveCreds().catch((err) => console.error(`[session:${id}] falha ao salvar credenciais`, (err as Error).message));
+    const key = (update as any)?.myAppStateKeyId;
+    if (key && key !== knownSyncKey) {
+      knownSyncKey = key;
+      console.log(`[labels:${id}] chaves de sincronização recebidas do celular`);
+      setTimeout(async () => {
+        try {
+          if (live.get(id) !== managed || !sock.ws.isOpen) return;
+          if ((await countLabelsInStore(id)) === 0) await resyncLabels(id);
+        } catch (err) {
+          console.warn(`[labels:${id}] releitura após receber chaves falhou: ${(err as Error).message}`);
+        }
+      }, 20_000).unref();
+    }
+  });
 
   sock.ev.on("connection.update", async (update) => {
     try {

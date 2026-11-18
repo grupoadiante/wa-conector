@@ -1,7 +1,7 @@
 # wa-connector
 
 Servidor próprio de conexão WhatsApp (Baileys) usado pelo Backster como "Meu Servidor".
-Build: `2026-11-18-labels-mode-self-heal-v2`.
+Build: `2026-11-18-labels-mode-self-heal-v3`.
 
 ## O que mudou nesta versão
 
@@ -17,6 +17,7 @@ Build: `2026-11-18-labels-mode-self-heal-v2`.
 | Log imprimia chaves privadas das sessões e centenas de linhas por minuto | Despejos do libsignal descartados; webhook entregue não é mais logado; falha de decriptação vira uma linha curta |
 | Quarentena de 30 min rejeitava a tentativa do próprio celular de refazer a comunicação com o conector | A própria conta de cada sessão nunca entra em quarentena (v2) |
 | Log de falha de decriptação não dizia qual aparelho enviou | A linha `[decrypt:...]` mostra `remetente usuário.aparelho`; `.0` é o celular principal (v2) |
+| Linha recém-pareada no modo `labels` ficava sem etiquetas | O filtro só liga depois que a linha recebe as chaves de sincronização; o log avisa quando elas chegam e `sessions-health` mostra `sync_keys` (v3) |
 | Várias etiquetas ao mesmo tempo no mesmo número | Fila por número, uma por vez, com pausa de 700 ms e limite de 20 s por operação |
 
 ## Modos de sessão
@@ -70,7 +71,7 @@ Respostas de etiqueta (`/labels`, `/labels/apply`, `/labels/remove`): `200` ok, 
 
 ## Depois de subir esta versão
 
-1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v2`.
+1. Conferir a versão: `GET /version` deve mostrar `2026-11-18-labels-mode-self-heal-v3`.
 2. Apagar as 17 sessões órfãs: `CONNECTOR_URL=... CONNECTOR_API_KEY=... bash scripts/apagar-orfas.sh`. Sem rodar o script, elas ficam paradas e são apagadas sozinhas em 24 h.
 3. Parear de novo a linha de etiquetas do 7930 (`org_50b07d5e_mtu93c6k`): as chaves dela se perderam ("Invalid PreKey ID").
 4. Conferir `GET /sessions-health`: as 9 linhas devem aparecer com `ws_open: true` e `labels` maior que zero. A do 8118 (`org_50b07d5e_muwyxkng`) deve ser relida sozinha na primeira auto-cura; se continuar em zero, chamar `POST /sessions/org_50b07d5e_muwyxkng/labels/resync`.

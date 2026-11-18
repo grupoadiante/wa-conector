@@ -52,6 +52,8 @@ export interface SessionHealth {
   live: boolean;
   ws_open: boolean;
   labels: number;
+  // true quando a linha tem as chaves de sincronização (sem elas não etiqueta)
+  sync_keys: boolean;
   reconnect_attempts: number;
   pending_reconnect: boolean;
   updated_at: string | null;
@@ -68,6 +70,7 @@ export async function describeSession(id: string, rec?: SessionRecord | null): P
     live: !!info,
     ws_open: !!info?.wsOpen,
     labels: await countLabelsInStore(id).catch(() => 0),
+    sync_keys: !!getLiveSocket(id)?.authState?.creds?.myAppStateKeyId,
     reconnect_attempts: getReconnectAttempts(id),
     pending_reconnect: hasPendingReconnect(id),
     updated_at: record?.updatedAt ?? null,
