@@ -345,6 +345,7 @@ export async function startSession(id: string, opts: StartOptions = {}): Promise
     stopping: false,
   };
   live.set(id, managed);
+  watchPatchErrors(id, sock);
 
   // Avisa no log quando as chaves de sincronização chegam (ou são renovadas)
   // e, se a lista de etiquetas ainda estiver vazia, relê em seguida.
@@ -581,6 +582,44 @@ export async function requestLabelStateRecovery(id: string): Promise<void> {
     { additionalAttributes: { category: "peer", push_priority: "high_force" } } as any
   );
   console.log(`[labels:${id}] recuperação manual: aviso enviado ao celular (TODOS os dispositivos do número serão desconectados)`);
+}
+
+// O Baileys NÃO confere a resposta do WhatsApp ao gravar um patch de estado
+// (etiqueta criada/aplicada): se o servidor recusa — tipicamente conflito de
+// versão (409) numa sessão com estado desatualizado — o chatModify resolve
+// como se tivesse dado certo e nada chega ao celular. Aqui lemos a resposta
+// crua e guardamos a recusa para o labels.ts tratar.
+export interface PatchError {
+  at: number;
+  collection: string;
+  code: string;
+  text: string;
+}
+const patchErrors = new Map<string, PatchError>();
+export function takePatchError(id: string, since: number): PatchError | null {
+  const e = patchErrors.get(id);
+  if (!e || e.at < since) return null;
+  patchErrors.delete(id);
+  return e;
+}
+function watchPatchErrors(id: string, sock: WASocket): void {
+  (sock.ws as any).on("CB:iq,,sync", (node: any) => {
+    try {
+      const sync = Array.isArray(node?.content) ? node.content.find((c: any) => c?.tag === "sync") : null;
+      const collections = Array.isArray(sync?.content) ? sync.content : [];
+      for (const col of collections) {
+        if (col?.tag !== "collection") continue;
+        const errNode = Array.isArray(col.content) ? col.content.find((c: any) => c?.tag === "error") : null;
+        if (col.attrs?.type !== "error" && !errNode) continue;
+        const code = String(errNode?.attrs?.code ?? "?");
+        const text = String(errNode?.attrs?.text ?? "");
+        patchErrors.set(id, { at: Date.now(), collection: String(col.attrs?.name ?? "?"), code, text });
+        console.warn(`[labels:${id}] WhatsApp recusou alteração de estado (${col.attrs?.name}): código ${code} ${text}`);
+      }
+    } catch {
+      /* leitura best-effort */
+    }
+  });
 }
 
 export function getLastLabelResync(id: string): number {

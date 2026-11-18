@@ -1,4 +1,5 @@
-import { getLiveSocket, isSessionHealthy, restartSession, resyncLabels } from "./session";
+import { getLiveSocket, isSessionHealthy, restartSession, resyncLabels, takePatchError } from "./session";
+import { upsertLabelInStore, setChatLabelAssociation } from "./labelStore";
 import { config } from "../config";
 
 export interface LabelOpResult {
@@ -88,6 +89,7 @@ async function withLabelSafety(sessionId: string, op: () => Promise<void>): Prom
     const sock = getLiveSocket(sessionId);
     if (!sock || !sock.ws.isOpen) return { ok: false, error: "session_not_connected" };
 
+    const startedAt = Date.now();
     try {
       await withTimeout(op(), config.labelOpTimeoutMs);
     } catch (err) {
@@ -124,6 +126,30 @@ async function withLabelSafety(sessionId: string, op: () => Promise<void>): Prom
 
     blocked.delete(sessionId);
     await new Promise((r) => setTimeout(r, 400));
+
+    // O Baileys não avisa quando o WhatsApp recusa a gravação. Conferimos a
+    // resposta crua: se houve recusa (ex.: 409 = estado local desatualizado),
+    // reconstruímos o estado do zero e tentamos UMA vez de novo.
+    let rejected = takePatchError(sessionId, startedAt);
+    if (rejected) {
+      console.warn(`[labels:${sessionId}] gravação recusada (código ${rejected.code}) — relendo o estado e tentando de novo`);
+      try {
+        await withTimeout(resyncLabels(sessionId), 30_000);
+        const retryAt = Date.now();
+        await withTimeout(op(), config.labelOpTimeoutMs);
+        await new Promise((r) => setTimeout(r, 400));
+        rejected = takePatchError(sessionId, retryAt);
+      } catch (retryErr) {
+        return { ok: false, error: `patch_retry_failed: ${(retryErr as Error)?.message || "erro"}` };
+      }
+      if (rejected) {
+        return {
+          ok: false,
+          error: `patch_rejected_${rejected.code}: o WhatsApp recusou a gravação (${rejected.collection}) mesmo após reler o estado. Pareie de novo a linha de etiquetas deste número.`,
+        };
+      }
+      console.log(`[labels:${sessionId}] gravação aceita após reler o estado`);
+    }
     if (!(await isSessionHealthy(sessionId))) {
       console.warn(`[labels:${sessionId}] sessão caiu após operação de etiqueta — reiniciando`);
       restartSession(sessionId).catch((e) =>
@@ -146,21 +172,28 @@ export function httpStatusForError(error: string): number {
   if (error === "session_not_connected") return 409;
   if (error === "label_timeout") return 408;
   if (error.startsWith("labels_blocked_repair_needed")) return 423;
+  if (error.startsWith("patch_rejected_")) return 409;
   return 422;
 }
 
 export async function applyLabel(sessionId: string, chatId: string, labelId: string): Promise<LabelOpResult> {
-  return withLabelSafety(sessionId, async () => {
+  const result = await withLabelSafety(sessionId, async () => {
     const sock = getLiveSocket(sessionId)!;
     await sock.chatModify({ addChatLabel: { labelId } }, chatId);
   });
+  // Com emitOwnEvents desligado o Baileys não avisa das nossas próprias
+  // gravações; atualizamos o cache aqui para as consultas refletirem.
+  if (result.ok) await setChatLabelAssociation(sessionId, chatId, labelId, true).catch(() => undefined);
+  return result;
 }
 
 export async function removeLabel(sessionId: string, chatId: string, labelId: string): Promise<LabelOpResult> {
-  return withLabelSafety(sessionId, async () => {
+  const result = await withLabelSafety(sessionId, async () => {
     const sock = getLiveSocket(sessionId)!;
     await sock.chatModify({ removeChatLabel: { labelId } }, chatId);
   });
+  if (result.ok) await setChatLabelAssociation(sessionId, chatId, labelId, false).catch(() => undefined);
+  return result;
 }
 
 // Cria ou edita a DEFINIÇÃO de uma etiqueta (nome/cor). O `id` é escolhido
@@ -169,8 +202,19 @@ export async function upsertLabelDefinition(
   sessionId: string,
   label: { id: string; name?: string; color?: number; deleted?: boolean }
 ): Promise<LabelOpResult> {
-  return withLabelSafety(sessionId, async () => {
+  const result = await withLabelSafety(sessionId, async () => {
     const sock = getLiveSocket(sessionId)!;
     await sock.chatModify({ addLabel: label }, sock.user!.id);
   });
+  // Sem isto a etiqueta criada pelo conector não aparecia em GET /labels, e o
+  // CRM mandava criar de novo a cada venda.
+  if (result.ok) {
+    await upsertLabelInStore(sessionId, {
+      id: String(label.id),
+      name: label.name ?? "",
+      color: label.color ?? 0,
+      deleted: !!label.deleted,
+    }).catch(() => undefined);
+  }
+  return result;
 }
