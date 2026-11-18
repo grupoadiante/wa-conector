@@ -27,7 +27,26 @@ const MAX_SESSIONS_TRIED = 6;
 const quarantinedUntil = new Map<string, number>();
 let installed = false;
 
+// IDs que NUNCA entram em quarentena: os da própria conta de cada sessão.
+//
+// Visto em 18/11: quando a comunicação entre o conector e o celular da
+// própria conta perde a sincronia, o celular tenta refazê-la mandando uma
+// mensagem com chave nova. Com a própria conta em quarentena, essa tentativa
+// era rejeitada por 30 minutos — e de novo, e de novo. A linha nunca se
+// recuperava e parava de receber as chaves de sincronização das etiquetas.
+// A quarentena existe para um LEAD que quebra o protocolo, não para a conta.
+const exemptIds = new Set<string>();
+
+export function exemptFromQuarantine(jid: string | undefined | null): void {
+  if (!jid) return;
+  const id = jid.split("@")[0].split(":")[0];
+  if (!id) return;
+  exemptIds.add(id);
+  quarantinedUntil.delete(id);
+}
+
 function isQuarantined(id: string): boolean {
+  if (exemptIds.has(id)) return false;
   const until = quarantinedUntil.get(id);
   if (!until) return false;
   if (Date.now() < until) return true;
@@ -68,7 +87,12 @@ export function installLibsignalGuard(): void {
     try {
       return await origDoDecrypt.apply(this, args);
     } catch (e: any) {
-      if (id && typeof e?.message === "string" && e.message.includes("Over 2000 messages into the future")) {
+      if (
+        id &&
+        !exemptIds.has(id) &&
+        typeof e?.message === "string" &&
+        e.message.includes("Over 2000 messages into the future")
+      ) {
         if (!quarantinedUntil.has(id)) {
           console.warn(
             `[libsignal-guard] contato ${id} estourou "Over 2000 messages into the future" — quarentena de ${QUARANTINE_MS / 60000}min (mensagens dele serão descartadas sem custo de CPU)`

@@ -186,8 +186,13 @@ export function createConnectionWatchLogger(
           }
           // Uma linha curta (sem stack), e só algumas por minuto.
           if (mayPrintDecryptLine(sessionId)) {
+            // O remetente real (usuário.aparelho) só aparece no stack do
+            // libsignal. ".0" é o celular principal; outro número é um
+            // aparelho vinculado (WAHA, WhatsApp Web).
+            const stack = String((obj as any)?.err?.stack ?? "");
+            const sender = stack.match(/at (?:async )?(\d+\.\d+) \[as awaitable\]/)?.[1] ?? "?";
             console.warn(
-              `[decrypt:${sessionId}] falha ao decifrar (${(obj as any)?.err?.message ?? "?"}) — chat ${key?.remoteJid ?? "?"} fromMe=${key?.fromMe === true}`
+              `[decrypt:${sessionId}] falha ao decifrar (${(obj as any)?.err?.message ?? "?"}) — remetente ${sender} chat ${key?.remoteJid ?? "?"} fromMe=${key?.fromMe === true}`
             );
           }
           return;

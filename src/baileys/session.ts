@@ -22,6 +22,7 @@ import { getCachedMessage, msgRetryCounterCache, rememberMessage } from "./msgCa
 import { createConnectionWatchLogger, createFailureTracker, createZombieSocketWatch } from "./decryptWatch";
 import { acquireLock, releaseLock } from "./lock";
 import { noteSessionClose } from "./resourceLog";
+import { exemptFromQuarantine } from "./libsignalGuard";
 
 type Managed = {
   sock: WASocket;
@@ -264,6 +265,10 @@ export async function startSession(id: string, opts: StartOptions = {}): Promise
 
   await writeRecord(id, { status: "starting", qr: null, mode, paired });
 
+  // A própria conta nunca entra em quarentena (ver libsignalGuard.ts).
+  exemptFromQuarantine(state.creds.me?.id);
+  exemptFromQuarantine(state.creds.me?.lid);
+
   const version = await getWaVersion();
   const labelsOnly = mode === "labels";
 
@@ -349,6 +354,8 @@ export async function startSession(id: string, opts: StartOptions = {}): Promise
       if (connection === "open") {
         managed.openedAt = Date.now();
         const me = sock.user;
+        exemptFromQuarantine(me?.id);
+        exemptFromQuarantine(me?.lid);
         const phone = me?.id?.split(":")[0]?.split("@")[0] ?? null;
         await writeRecord(id, {
           status: "connected",
